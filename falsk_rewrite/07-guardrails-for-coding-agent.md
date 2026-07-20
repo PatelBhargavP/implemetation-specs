@@ -23,6 +23,7 @@
 - Typed config from env (pydantic-settings); no literals/secrets in code.
 - Typed domain exceptions mapped to HTTP status/codes (doc 04 §6).
 - Repositories are the only DB access; services own transactions; workers use short transactions (doc 05 §4).
+- **`uv` for all package management** (doc 04 §1, doc 06 §0): deps in `pyproject.toml` + committed `uv.lock`; install via `uv sync --frozen`; run tooling via `uv run`. Adding a dependency = `uv add` (lockfile diff visible in the PR). Never introduce `requirements.txt`, Poetry, or ad-hoc `pip install` in code, CI, or Docker.
 - Structured logging with `request_id`/`session_id`/`invocation_id` on every log line; OpenTelemetry tracing wired through ADK (doc 03 §7).
 
 ## 3. Definition of Done (per module/PR)

@@ -44,7 +44,11 @@ app/
 tests/
   unit/  integration/  contract/  parity/
 migrations/               # Alembic (existing history preserved)
+pyproject.toml            # project metadata + deps (managed by uv)
+uv.lock                   # committed lockfile (uv)
 ```
+
+**Packaging/tooling:** the project is managed with **`uv`** (matches the current project). All dependencies declared in `pyproject.toml`, locked in a committed `uv.lock`; dev/test tooling in a `dev` dependency group. Install with `uv sync --frozen` (CI, Docker); execute tooling via `uv run` (`uv run pytest`, `uv run alembic ...`). No `requirements.txt`, no Poetry, no bare `pip install` (doc 06 §0, doc 07 §2).
 
 **Hard rule:** no module may exceed a reasonable size (target ≤ ~400 lines); if a router or service grows past that, split by resource/use-case. The monolith must not reappear in disguise.
 
