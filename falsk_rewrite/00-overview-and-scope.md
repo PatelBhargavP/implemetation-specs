@@ -35,6 +35,7 @@ This rewrite is a **greenfield reimplementation** on **FastAPI**, using **Google
 - **NG4** — Do **not** replace IAP with an in-app authentication/identity provider. IAP remains the authenticator; the app trusts and records identity headers.
 - **NG5** — Do **not** introduce new infrastructure dependencies (message brokers, new datastores) beyond what is specified here (Postgres/AlloyDB, Redis, GCS). If you believe one is needed, raise it in doc 08 rather than adding it.
 - **NG6** — Do **not** "improve" or refactor frozen prompt/tool text for style. Copy exactly.
+- **NG7** — Do **not** add a separate service/server for the UI. The compiled React app is served by the same FastAPI process (`index.html` at the base path; app endpoints under `/api/*`), exactly as today (doc 04 §10). No standalone frontend host, no client-side router added in this rewrite.
 
 ## 4. Preservation boundary — what is FROZEN vs REWRITTEN
 
@@ -45,6 +46,7 @@ This rewrite is a **greenfield reimplementation** on **FastAPI**, using **Google
 - **Domain algorithms** — resource/deck estimation math, standard-curve/concentration/QC calculations, and the DAG execution semantics (`pyrobot` driver protocol). Port logic faithfully; wrap, don't rewrite, the numerics.
 - **Database schema & Alembic history** — existing tables (including `sessions`, `users`) and migration chain are preserved; changes are additive (doc 05).
 - **Externally observable API + WebSocket message contracts** — message shapes the existing React frontend depends on (see doc 04 §7 and the session-init lifecycle) must remain compatible, unless doc 08 resolves otherwise.
+- **API key manager service** — the existing service that loads/manages API keys and performs key rotation is **used as-is, unaltered**. Port it verbatim from `legacy/` (or depend on it in place if it is a separate package) and consume it through its existing interface. The new harness obtains all API keys through this service; it does **not** reimplement key loading, storage, or rotation, and does not read keys from env/config directly (doc 03 §2.1, doc 04 §3, guardrail doc 07 #14).
 
 **REWRITTEN (the "harness"):**
 

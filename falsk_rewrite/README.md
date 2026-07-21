@@ -12,8 +12,8 @@ A spec suite for rewriting FALSK (lab-automation experiment planner) from the cu
 - **01 — Target architecture.** Components, flows, deployment, Vertex AI seam.
 - **02 — State & concurrency.** ⭐ The centerpiece: OCC fix + background-write pattern.
 - **03 — ADK integration.** Runner, session/artifact services, orchestration, latency plan.
-- **04 — FastAPI backend.** Layout, IAP auth, structured errors, WebSocket lifecycle.
-- **05 — Data model.** Preserved schema + additive execution/outbox tables, Alembic policy.
+- **04 — FastAPI backend.** Layout, IAP auth, structured errors, WebSocket lifecycle, `/api/*` + SPA serving.
+- **05 — Data model.** Preserved schema (reuses `chat_messages`, `session_metadata`) + one additive `executions` table, Alembic policy.
 - **06 — Migration plan.** Phased, gated, parity-checked.
 - **07 — Guardrails.** Binding rules + CI enforcement for the coding agent.
 - **08 — Open questions.** Needs Bhargav's answers; assumptions are flagged.

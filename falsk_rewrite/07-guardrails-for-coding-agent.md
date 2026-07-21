@@ -7,7 +7,7 @@
 1. **Do not alter frozen assets** (doc 00 §4): agent prompts render byte-identical; tool names, parameters, and return shapes are unchanged. No "cleanup" or rewording of prompts.
 2. **Never mutate `session.state` directly.** All ADK state changes go through `output_key`, `EventActions.state_delta`, or `ToolContext`/`CallbackContext` (doc 02 P2). A fetched `Session` is read-only outside a managed context.
 3. **One invocation per turn.** Do not implement multi-agent orchestration as multiple `Runner` invocations or multiple sessions per turn. Use ADK sub-agent composition inside one invocation (doc 02 P1, doc 03 §4).
-4. **Background workers never write ADK session state** except through the OutboxReconciler (doc 02 §5–6). `session_service` must not be a dependency of any worker.
+4. **Background workers never write ADK session state.** `session_service` must not be a dependency of any worker; workers write only the `executions` table + GCS and publish via the `Broadcaster` (doc 02 §5). (The outbox path is out of scope — doc 02 §6.)
 5. **No destructive schema changes.** Additive Alembic migrations only; ADK-owned tables excluded from app migrations (doc 05 §5).
 6. **No new infrastructure** beyond Postgres/AlloyDB, Redis, GCS (doc 00 NG5). No new brokers/datastores/queues.
 7. **IAP stays the authenticator** (doc 00 NG4). Do not build an in-app login/identity provider.
@@ -15,6 +15,9 @@
 9. **The monolith must not reappear.** No "god" module holding all endpoints/logic. Respect the layering and module-size limits (doc 04 §1).
 10. **Do not implement out-of-scope features:** remote/network robot execution and the Vertex AI runtime are seams only (doc 00 NG3, doc 01 §6). Leave documented stubs.
 11. **No secret or stack-trace leakage** to clients; all errors go through the structured envelope (doc 04 §6).
+12. **Build the agent tree once at startup; do not initialize agents per session.** Compose it explicitly in `agents/factory.py`; agents hold no session state. **Remove the old `AGENT_CONFIG` name→identifier→directory dictionary and any directory-autoload/reflection** — the tree is the single source of truth, ADK resolves delegation by `agent.name` (doc 03 §1.1). **Keep `agent_config.yaml` as the factory's declarative per-agent tuning source** (model/tier, temperature, token limits, tool attachment by frozen identifier), parsed into validated specs once at startup and consumed by the factory — never a runtime dispatcher, and never a store of prompt/tool definitions, which stay frozen in their modules (doc 03 §1.2, rule #1). Runtime-dynamic agent *selection*, if ever needed, is raised in doc 08 first.
+13. **`legacy/` is read-only reference, never a dependency.** All current code is quarantined in `legacy/` (doc 06 §0). New code must **never** `import` from `legacy/`; frozen assets are *copied* out (with parity/hash checks), not referenced. `legacy/` is excluded from the package, `uv` workspace, lint, type-check, tests, and the Docker build context. Do not edit files under `legacy/`. Add a CI check that fails on any `legacy` import in new code (§5). *(The API key manager service — #14 — is the one deliberate carry-over: it is a frozen asset ported verbatim, not new harness code, and is used through its own interface.)*
+14. **Use the API key manager service as-is; never reimplement key handling.** All API keys are obtained through the existing key manager (frozen, doc 00 §4); do not read keys from env/config in new code, do not build a parallel key loader/rotator, and do not alter the service. Consume keys rotation-safely so rotation takes effect without a restart (doc 03 §2.1). Construct it once in lifespan (doc 04 §2–3).
 
 ## 2. Required patterns
 
@@ -51,6 +54,7 @@ A change is done only when:
 - **Grep/AST gate 2:** fail if `google.adk` is imported outside `app/integration/adk_runtime.py` and `app/agents/`.
 - **Grep/AST gate 3:** fail if `Runner(` / `run_async(` is instantiated/called outside `adk_runtime.py`.
 - **Grep gate 4:** fail if any worker module imports the session service.
+- **Grep gate 5:** fail if new code imports from `legacy/` (e.g. `from legacy` / `import legacy`) or references `legacy.` paths (doc 07 #13).
 - **Prompt-hash check:** store a hash of each frozen prompt; CI fails if a rendered prompt hash changes without an explicit approved override.
 - **Module-size lint:** warn/fail past the size budget (doc 04 §1).
 - **Migration check:** CI runs `alembic upgrade head` + `downgrade` on a scratch DB; autogenerate against ADK tables must produce no diff.

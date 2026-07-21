@@ -28,10 +28,10 @@ The current pain comes from two distinct problems that the bespoke "Turn-Aware" 
 | Cross-session per-user prefs | ADK `user:`-prefixed state | Turn invocation | Persistent per user |
 | App-wide constants/config surfaced to agents | ADK `app:`-prefixed state | Rare, controlled turns | Persistent |
 | Ephemeral within one invocation | ADK `temp:`-prefixed state | Any agent in the invocation | Discarded after invocation (never persisted) |
-| Execution runtime: DAG status, per-step results, device telemetry | `executions`, `execution_steps`, `execution_events` (doc 05) | `ExecutionWorker` (background) via repositories | Independent of turns; long-lived |
-| Analysis runtime: job status, computed curves/QC | `analysis_jobs` (doc 05) | `AnalysisWorker` | Independent of turns |
+| Execution/analysis runtime: DAG status, per-step progress, job status, computed curves/QC | `executions` (single table, `kind` discriminator; per-step progress inlined as jsonb — doc 05 §3) | `ExecutionWorker`/`AnalysisWorker` (background) via repositories | Independent of turns; long-lived |
+| UI event stream (events broadcast to the UI) | **existing** `chat_messages` table (reused, unaltered — doc 05 §2) | Turn invocation / broadcaster | Persistent |
+| App session extras (session sharing, etc.) | **existing** `session_metadata` table (reused, unaltered — doc 05 §2) | App services | Per-session |
 | Artifacts (plots, reports, raw data) | GCS via ADK `GcsArtifactService` and/or `ArtifactService` | Turn invocation and/or workers | Persistent, versioned |
-| Pending in-session reflections (rare) | `session_state_outbox` (doc 05) | Background workers (enqueue); OutboxReconciler (apply) | Short-lived |
 | WebSocket conn ↔ instance mapping | Redis | WS router | Connection-scoped |
 
 **Guardrail:** background workers have **no code path** that calls `append_event` on an ADK session except through the OutboxReconciler (§6). Enforce by keeping `session_service` out of worker dependencies.
@@ -53,8 +53,8 @@ This is the core fix. Background work is modeled as **its own durable domain**, 
 **Rules:**
 
 1. When a turn approves a plan (or requests analysis), the turn invocation records the *intent and identifiers* into ADK session state (e.g. `execution_id`) via a normal `state_delta`, then hands off. The turn ends normally.
-2. `ExecutionService`/`AnalysisService` create the durable row (`executions`/`analysis_jobs`) **before** returning, so the job's authoritative record exists independent of any session/turn.
-3. The background worker writes **only** to execution-domain tables and GCS, and **only** publishes live UI updates via the `Broadcaster`. It never loads or writes the ADK session. Its writes are ordinary repository writes under their own short transactions — no OCC against the session, ever.
+2. `ExecutionService`/`AnalysisService` create the durable `executions` row (one table, `kind='execution'|'analysis'`) **before** returning, so the job's authoritative record exists independent of any session/turn.
+3. The background worker writes **only** to the `executions` table and GCS, and **only** publishes live UI updates via the `Broadcaster` (which persist to the existing `chat_messages` table like any other UI event). It never loads or writes the ADK session. Its writes are ordinary repository writes under their own short transactions — no OCC against the session, ever.
 4. **Result re-entry (default, P5):** the next time the user prompts, the turn's agents obtain execution/analysis results through a **tool** (e.g. `get_execution_status(execution_id)`, `get_analysis_result(job_id)`) that reads the execution store. Results thus enter agent reasoning *pulled by a live invocation*, which legitimately writes them into session state via that invocation's `state_delta`. Nothing is lost if the original turn finished first, because the execution store — not session state — is the source of truth.
 
 This means: **"turn completes before background process completes" is no longer a failure mode.** The background process was never depending on the turn staying open; it persists to its own store and the UI keeps updating via Redis broadcast regardless of turn state.
@@ -85,12 +85,12 @@ This preserves the "single serial writer per session" invariant even for asynchr
 - **INV-4** Turn serialization holds across instances (advisory lock, not in-process lock).
 - **Failure handling:** if `append_event` raises a stale/conflict error, do **not** silently retry-loop. Log with full context (session_id, invocation_id), emit a telemetry counter, fail the turn with `409` and a structured error. A recurring conflict means an invariant is violated and must be fixed, not masked. (A single bounded retry after reload is acceptable for the outbox reconciler only.)
 - **Crash recovery (policy confirmed — doc 08 Q3):** on startup, `ExecutionWorker`/`AnalysisWorker` supervisors scan for rows in non-terminal states (`queued`/`running`) with no live task and **automatically retry them up to 3 attempts** (tracked by an `attempts` counter on the `executions`/`analysis_jobs` row). After the 3rd failed attempt the row is marked `failed` and requires explicit user re-trigger. The execution store being authoritative makes recovery well-defined. **Hardware-safety constraints on retry:**
-  - Resume from the **last completed DAG step boundary** recorded in `execution_steps` — never blindly re-run steps already marked completed.
+  - Resume from the **last completed DAG step boundary** recorded in `executions.progress` / `last_completed_step_seq` — never blindly re-run steps already marked completed.
   - Any step that is not **verifiably idempotent** (e.g. an irreversible liquid transfer) must not be auto-replayed; such a step requires hardware-state confirmation (or user acknowledgement) before the retry proceeds. If confirmation is unavailable, halt and mark `interrupted` for that step rather than risk a double-dispense.
-  - Each retry emits an `execution_event` so the UI stream reflects the attempt (doc 04 §8).
+  - Each retry emits a broadcast event (captured in the existing `chat_messages` table like any other UI event) so the UI stream reflects the attempt (doc 04 §8).
 
 ## 8. What happens to the existing "Turn-Aware" mechanism
 
 - Its **intent is preserved**, its **implementation is replaced** by ADK-native single-invocation semantics (P1). The custom "load one session ref per turn / sub-agents return diffs / parent aggregates / atomic end-of-turn commit" logic is **removed** in favor of ADK's own per-event `state_delta` + `append_event` within one invocation.
-- The one scenario the old mechanism was reaching for and ADK does not cover natively — background/async reflections into a session — is handled explicitly by §5 (pull model) and §6 (outbox), not by keeping a session reference alive across a turn boundary.
+- The one scenario the old mechanism was reaching for and ADK does not cover natively — background/async reflections into a session — is handled explicitly by §5 (pull model; the default and only built path), not by keeping a session reference alive across a turn boundary. (§6's outbox is the sanctioned-but-unbuilt fallback if a proactive in-conversation reflection is ever required — doc 08 Q2.)
 - **Guardrail:** do not port the old diff-aggregation code. If, during implementation, a case appears that seems to need it, stop and record it in doc 08 rather than resurrecting the pattern.

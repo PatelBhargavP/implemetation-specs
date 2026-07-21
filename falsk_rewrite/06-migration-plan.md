@@ -1,11 +1,15 @@
 # FALSK Rewrite — 06 · Migration & Implementation Plan
 
-> Greenfield repo (doc 00 NG). Build in vertical slices, prove parity continuously, cut over once. Each phase ends with a gate the coding agent must pass before proceeding.
+> Greenfield rebuild **in the same repo**: move all current code into `legacy/`, build the new app fresh at the repo root alongside it. `legacy/` is a read-only reference for frozen-asset extraction and parity — never imported by new code. Build in vertical slices, prove parity continuously, cut over once. Each phase ends with a gate the coding agent must pass before proceeding.
 
-## 0. Phase 0 — Inventory & scaffolding (no behavior yet)
+## 0. Phase 0 — Legacy quarantine, inventory & scaffolding (no new behavior yet)
 
-- **Inventory current assets from the old codebase** (the coding agent has full read access to it — doc 00 A6): extract the exact agent prompts (including any composition logic that renders them), tool signatures/return shapes, the current DB schema + Alembic history, the current REST paths, and the current WS message shapes. Record file paths in the old repo for each asset. Produce a checked-in `INVENTORY.md` listing every frozen asset (doc 00 §4) with its source location and a content hash. **Gate:** inventory reviewed and signed off before any agent code is copied.
-- **Old-code usage rule:** the old repo is authoritative for *frozen assets* and a behavioral reference for parity, but its harness code (server, session handling, Turn-Aware layer) must **not** be ported — that is exactly the code being replaced (doc 00 §4, doc 02 §8).
+- **Move all current code into a top-level `legacy/` folder** as the first commit, unchanged. This preserves the old system verbatim for extraction/parity while the new app is built at the repo root. Do **not** edit files inside `legacy/`. Rationale: keeps both trees in one Antigravity workspace so the agent can read the old code and write the new code side by side.
+- **Inventory current assets from `legacy/`** (doc 00 A6): extract the exact agent prompts (including any composition logic that renders them), tool signatures/return shapes, the current DB schema + Alembic history, the current REST paths (note the `/api/*` prefix — doc 04 §9), the current WS message shapes/path, and the **API key manager service** (its module + public interface — doc 00 §4; capture how callers obtain a key and how rotation surfaces, so it can be wired rotation-safely per doc 03 §2.1). Record the `legacy/`-relative source path for each asset. Produce a checked-in `INVENTORY.md` listing every frozen asset (doc 00 §4) with its source location and a content hash. **Gate:** inventory reviewed and signed off before any agent code is copied.
+- **Old-code usage rule:** `legacy/` is authoritative for *frozen assets* and a behavioral reference for parity, but its harness code (server, session handling, Turn-Aware layer) must **not** be ported — that is exactly the code being replaced (doc 00 §4, doc 02 §8). New code must never `import` from `legacy/` (guardrail doc 07 #13).
+- **Alembic continuity (critical):** the preserved DB is governed by the *existing* migration chain. **Copy** the existing `migrations/versions/` history into the new app's Alembic directory so its revision history is intact and new revisions append to the current head — do **not** start a fresh Alembic history, or autogenerate will try to recreate tables that already exist (doc 05 §5, §5.1).
+- **Scaffold** the layout (doc 04 §1): config, DatabaseService, DI container, logging/tracing, health endpoints, empty routers, test harness, CI. Nothing calls ADK yet.
+- **Tooling: `uv` is the package manager** (already in use on the current project). Project metadata and all dependencies live in `pyproject.toml` with a committed `uv.lock`; use dependency groups (e.g. `dev`) for test/lint tooling. CI and Docker install with `uv sync --frozen` (never `pip install`); run tooling via `uv run` (`uv run pytest`, `uv run alembic upgrade head`, `uv run ruff check`). Do not introduce `requirements.txt`, Poetry, or pip-based flows. **Exclude `legacy/`** from the new app's package, `uv` workspace, lint/type-check, test collection, and the Docker build context (e.g. `.dockerignore`) so old code is never installed, imported, or shipped.
 - **Scaffold** the layout (doc 04 §1): config, DatabaseService, DI container, logging/tracing, health endpoints, empty routers, test harness, CI. Nothing calls ADK yet.
 - **Tooling: `uv` is the package manager** (already in use on the current project). Project metadata and all dependencies live in `pyproject.toml` with a committed `uv.lock`; use dependency groups (e.g. `dev`) for test/lint tooling. CI and Docker install with `uv sync --frozen` (never `pip install`); run tooling via `uv run` (`uv run pytest`, `uv run alembic upgrade head`, `uv run ruff check`). Do not introduce `requirements.txt`, Poetry, or pip-based flows.
 - **Gate 0:** app boots, `/healthz` green, CI runs unit tests, lint/type-check pass.
@@ -20,6 +24,7 @@
 ## 2. Phase 2 — ADK runtime (single-invocation turns)
 
 - Port frozen agents/prompts/tools into `app/agents/` verbatim (doc 03 §1); contract-test tools against captured schemas.
+- Port the frozen **API key manager service** verbatim and wire ADK model credentials through it, rotation-safely (doc 03 §2.1). No env/config key reads in new code.
 - Implement `AdkRuntimeImpl` with a single process Runner, `DatabaseSessionService`, `GcsArtifactService` (doc 03 §2).
 - Implement `TurnService` with the per-session advisory lock (doc 02 §4) and one-invocation `run_turn`.
 - Implement WebSocket chat + session-init lifecycle (doc 04 §7) + Broadcaster (doc 04 §8).
@@ -27,8 +32,8 @@
 
 ## 3. Phase 3 — Execution & analysis (background, decoupled)
 
-- Implement `ExecutionService` + `ExecutionWorker` + execution tables (doc 05 §3), driving `HardwareGateway` (real pyrobot/USB where available; a deterministic simulator otherwise).
-- Implement `AnalysisService` + `AnalysisWorker`.
+- Implement `ExecutionService` + `ExecutionWorker` + the single `executions` table (doc 05 §3), driving `HardwareGateway` (real pyrobot/USB where available; a deterministic simulator otherwise). First check Phase 0 inventory — if the old schema already has a suitable execution/job table, extend it additively instead of adding a new one.
+- Implement `AnalysisService` + `AnalysisWorker` (writes to the same `executions` table with `kind='analysis'`; reuses existing `chat_messages` for UI events — no new tables).
 - Implement the worker `supervisor` (lifespan-managed tasks + crash recovery, doc 04 §1 / doc 02 §7).
 - Implement result re-entry via tools (doc 02 §5 pull model). The outbox + reconciler is **out of scope** (doc 08 Q2) — do not build it; the live UI stream is served by the Broadcaster.
 - Implement crash recovery with **bounded 3-attempt retry** resuming from `last_completed_step_seq`, honoring the non-idempotent-step safety rule (doc 02 §7).

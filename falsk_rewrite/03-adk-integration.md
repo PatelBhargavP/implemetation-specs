@@ -7,10 +7,10 @@
 ```
 app/agents/
   __init__.py
-  registry.py            # builds & returns configured agent objects; single source of truth
+  factory.py             # build_root_agent(config) -> BaseAgent : composes the tree EXPLICITLY, once
   orchestrator.py        # root agent definition + composition of sub-agents
   planner/
-    agent.py             # LlmAgent config (model, instruction=FROZEN prompt, tools)
+    agent.py             # def build_planner(cfg) -> LlmAgent (model, instruction=FROZEN prompt, tools)
     prompt.py            # FROZEN instruction text, verbatim
     tools.py             # FROZEN tool contracts (signatures/return shapes preserved)
   hardware/
@@ -26,6 +26,31 @@ app/agents/
 
 - **Prompts** live in `prompt.py` files as verbatim constants, extracted directly from the old codebase (doc 00 A6). If the current system composes prompts dynamically, port the composition so the rendered string is byte-identical (doc 00 §4). Record the old-repo source path of each prompt in `INVENTORY.md` (doc 06 §0).
 - **Tools** keep their exact names, parameters, and return shapes. Re-home implementation code, but do not alter observable behavior. Tools that mutate state do so via `ToolContext` (never direct `session.state` writes).
+
+### 1.1 Agent lifecycle — build once, no per-session init, no name→directory dictionary
+
+**Binding decisions (do not deviate — doc 07):**
+
+1. **Agents are stateless, reusable definitions.** All per-turn/per-session state lives in the ADK `InvocationContext` and the session (via `session_service`) — **never** on an agent object. Do not store anything mutable and session-specific as agent instance state.
+2. **Build the agent tree exactly once, at process startup** (FastAPI lifespan), and share the single tree across all sessions and all concurrent turns. The tree is held on `AdkRuntime` alongside the single `Runner` (§2). **Do NOT re-initialize or re-instantiate agents when a new session starts** — that is wasted allocation and a concurrency-bug vector under multi-user load. A new session is just a new `session_id` handed to the same `Runner` + same tree.
+3. **Composition is explicit, not reflective.** `factory.py` exposes a single `build_root_agent(config) -> BaseAgent` that imports each leaf agent's `build_*` function and wires the tree with ADK-native constructs (`sub_agents=[...]`, `AgentTool`, `ParallelAgent`, `SequentialAgent` — §4). **Remove the old `{name → identifier/description → directory}` dictionary and any directory-autoload / reflection mechanism.** The tree itself is the single source of truth; ADK resolves delegation/transfer by `agent.name` within the reachable tree, so no external lookup dict is needed for wiring.
+4. **Adding or changing an agent** = create/edit its module + `build_*` function and wire it into `factory.py`. This must be visible in one place and type-checked — no runtime name-string indirection.
+
+### 1.2 `AGENT_CONFIG` object → removed. `agent_config.yaml` → retained as the factory's declarative tuning source
+
+Two distinct things in the old code, with opposite fates:
+
+- **`AGENT_CONFIG` (the in-code object): REMOVE.** This is the name→identifier→description→directory dispatcher (§1.1 rule 3). It is deleted along with any directory-autoload/reflection. The agent tree in `factory.py` is the single source of truth; ADK resolves delegation by `agent.name`, so no dispatch dict is needed.
+- **`agent_config.yaml` (the tuning file): KEEP.** This is the legitimate declarative per-agent tuning table, and it becomes the factory's build-time input.
+
+Rules for `agent_config.yaml`:
+
+- **What it holds:** per-agent knobs only — model / model-tier, temperature, `max_tokens` / token limits, and *which* frozen tools attach to which agent (by frozen tool identifier). These are the harness-level settings the rewrite is allowed to tune (e.g. model tiering for latency, doc 03 §7).
+- **What it must NOT hold:** prompt text or tool implementations. Those stay as frozen constants in each agent's `prompt.py` / `tools.py` (doc 07 #1) — the single source of truth. The YAML may *reference* a tool by its frozen identifier to attach it, but never redefine it, and must not carry directory/dispatch mappings (that's the removed `AGENT_CONFIG` concern).
+- **How it's used:** loaded and **parsed into typed, validated specs once at startup** (e.g. pydantic models); `factory.build_root_agent()` consumes those specs and wires each `LlmAgent`/composite. No runtime name-string lookup, no reflection, no directory autoload. A malformed YAML fails fast at startup, not at first turn.
+- **Enumeration:** if the UI/API must list agents with descriptions, **derive** it by walking the built tree, not from the YAML and not from a second dict.
+
+**Sanctioned extension:** if the *set* of agents must additionally vary at runtime (e.g. experiment-type-specific expert panels), the factory may select a subset driven by this same YAML config — still no parallel dispatch dict. If you believe runtime-dynamic *selection* (beyond static tuning) is required, raise it in doc 08 before building it.
 
 ## 2. The `AdkRuntime` interface (the only ADK boundary)
 
@@ -53,12 +78,18 @@ Implementation `AdkRuntimeImpl` holds a **single process-wide `Runner`** (or a s
 - `session_service = DatabaseSessionService(db_url=<AlloyDB async URL>)` — bound via config; the interface allows swapping to `VertexAiSessionService` later (doc 01 §6). Reuse one instance for the process; it manages its own connection pool.
 - `artifact_service = GcsArtifactService(bucket_name=<cfg>)` — for plots/reports/raw data. `InMemoryArtifactService` in tests, `FileArtifactService`/`InMemory` for local dev by config.
 - `memory_service` — only if the current app uses long-term memory; otherwise omit (do not add capability that doesn't exist today).
-- Agents from `registry.py`.
+- The root agent tree from `factory.build_root_agent(config)`, **built once here at startup** and reused for every session/turn (§1.1).
 
 **Rules:**
 - Construct services **once** (startup/lifespan); never per request. `DatabaseSessionService` and its pool are shared.
 - `run_turn` performs exactly one `runner.run_async(...)` and iterates its event stream, calling `on_event` for each. It does not open nested runners.
 - No service outside this module imports `google.adk.*`.
+
+### 2.1 API keys come from the existing key-manager service (frozen, rotation-aware)
+
+- The model/LLM credentials ADK uses (e.g. Gemini API keys) are supplied **exclusively by the existing API key manager service** (doc 00 §4, frozen). The key manager is injected into `AdkRuntimeImpl`; agent/model construction obtains keys from it. Keys are **never** read from env vars or config files by new code, and the key manager is **not** reimplemented or modified.
+- **Rotation safety:** the key manager performs rotation, so a key must not be snapshotted once at process start and cached forever. Obtain the current key at the point of use per the manager's contract (fetch-on-use, or subscribe to its refresh callback / short-TTL accessor) so a rotation takes effect without a restart. If model clients are built once at startup, they must pull the live key from the manager on each call (or be rebuilt on rotation) — confirm the manager's exact interface in Phase 0 inventory (doc 06 §0) and wire whichever pattern it supports.
+- Construct the key manager **once** in lifespan (a shared singleton) and pass it through the DI container (doc 04 §3); do not instantiate it per request or per turn.
 
 ## 3. Session & state management via ADK
 
@@ -84,7 +115,7 @@ All of these execute inside the same `InvocationContext`, share one session, and
 
 - Use ADK artifact APIs (`save_artifact` / `load_artifact`, versioned) for binary/large outputs: generated plots, analytical reports, raw plate-reader data.
 - Filename scoping: session-scoped artifacts use plain names; cross-session/user artifacts use the `user:` filename prefix per ADK convention. Record artifact references (bucket path + version) in the domain/execution tables so REST endpoints can list/serve them without going through an agent.
-- Large raw data from execution/analysis workers is written to GCS directly by the worker via the same artifact service (or a thin GCS client behind `ArtifactService`), and its reference stored in `execution_events`/`analysis_jobs`.
+- Large raw data from execution/analysis workers is written to GCS directly by the worker via the same artifact service (or a thin GCS client behind `ArtifactService`), and its reference stored in `executions.result_refs`.
 
 ## 6. RunConfig & safety limits
 

@@ -13,30 +13,36 @@
 - **`sessions`** — ADK session persistence, managed by ADK's `DatabaseSessionService`. **This is ADK-owned.** Treat its schema as controlled by the ADK library version; do not hand-edit its columns. Application code reads/writes it only through ADK (doc 02, doc 03), never via app repositories.
   - Note: ADK's `DatabaseSessionService` manages its own storage models (`StorageSession`, `StorageAppState`, `StorageUserState`) and performs auto-migration of *its* tables. Keep app Alembic migrations from colliding with ADK-managed tables — segregate (see §5.1).
 - **`users`** — user records; upserted from IAP identity (doc 04 §5). App-owned via `UserRepository`.
-- Any other current domain tables (trial histories, conversational logs, plan/session metadata) — **enumerate them from the old codebase's models/Alembic history and preserve**. (Action for coding agent: complete the Phase 0 schema inventory before writing migrations; list them in the migration PR.)
+- **`session_metadata`** — existing app-owned per-session extras (session sharing, and any other app-level session attributes). **Preserved and reused as-is.** The rewrite does **not** add a parallel table for session extras; anything the app needs to hang off a session that is not ADK conversational state goes here (doc 02 §3). Do not fold execution/job status into this table — those have a different lifecycle (see §3).
+- **`chat_messages`** — existing app-owned table that captures the events broadcast to the UI (the conversational/event stream). **Preserved and reused as-is; do NOT alter it.** It is the store of record for UI event replay. The rewrite adds **no** parallel event-log table (see §3, and the removed `execution_events` note in §3.1).
+- Any other current domain tables (trial histories, plan metadata, etc.) — **enumerate them from the old codebase's models/Alembic history and preserve**. (Action for coding agent: complete the Phase 0 schema inventory before writing migrations; list them in the migration PR.)
 
-## 3. New tables (execution & reconciliation domain — additive)
+## 3. New table — exactly ONE, and only because existing tables can't serve it
 
-These implement the durable-execution decoupling (doc 02 §5). All app-owned, all via repositories.
+The rewrite adds a **single** app-owned table: `executions`. It exists for **durability/correctness, not logging and not speed** — it is the fix for the reported failure "turn completes before the background process completes → state updates lost" (doc 02 §5, Problem B). It is deliberately *not* ADK session state (which loses background writes to OCC + turn lifecycle) and *not* `session_metadata`/`chat_messages` (wrong lifecycle — see §3.1). Before creating it, the coding agent must check Phase 0 inventory: **if the old schema already has a suitable execution/job table, extend it additively instead of creating a new one.**
 
-**`executions`**
-- `id` (uuid, pk), `session_id` (fk logical link to the session that approved it), `user_id`, `plan_id`/plan snapshot ref, `status` (`queued|running|completed|failed|interrupted|cancelled`), `attempts` (int, default 0 — crash-recovery retry counter, capped at 3 per doc 02 §7), `last_completed_step_seq` (int, nullable — resume boundary), `created_at`, `started_at`, `finished_at`, `error` (nullable structured), `result_artifact_refs` (jsonb: GCS refs).
+**`executions`** (covers both plan executions *and* analysis jobs via a `kind` discriminator — one table, not two)
+- `id` (uuid, pk)
+- `kind` (`execution` | `analysis`) — discriminator; avoids a near-identical second table
+- `session_id` (logical fk to the session that approved it), `user_id`
+- `plan_id` / plan snapshot ref (nullable for `analysis`)
+- `status` (`queued|running|completed|failed|interrupted|cancelled`)
+- `attempts` (int, default 0 — crash-recovery retry counter, capped at 3 per doc 02 §7)
+- `progress` (jsonb) — per-step DAG progress **inlined here** (each entry: `seq`, `dag_node_id`, `status`, timestamps, compact inputs/outputs, device/driver info, error). Large blobs go to GCS with refs, not into this column.
+- `last_completed_step_seq` (int, nullable — crash-recovery resume boundary; read from `progress`)
+- `created_at`, `started_at`, `finished_at`, `error` (nullable structured)
+- `result_refs` (jsonb: GCS refs — plan artifacts, or standard curves / concentrations / QC / report paths for `analysis`)
 
-**`execution_steps`**
-- `id` (pk), `execution_id` (fk), `dag_node_id`, `seq`, `status`, `started_at`, `finished_at`, `inputs`/`outputs` (jsonb, compact — large blobs go to GCS with refs here), `device`/driver info, `error`.
+### 3.1 What was removed and what it maps to
 
-**`execution_events`**
-- `id` (pk), `execution_id` (fk), `ts`, `type`, `payload` (jsonb). Append-only event log used for live broadcast replay and post-hoc audit. This is the execution-domain analog of an event stream — **not** ADK events.
-
-**`analysis_jobs`**
-- `id` (pk), `session_id`, `execution_id` (nullable), `status`, `attempts` (int, default 0 — crash-recovery retry counter, capped at 3 per doc 02 §7), timestamps, `inputs_ref`, `result_refs` (jsonb: standard curves, concentrations, QC, report GCS paths), `error`.
-
-**`session_state_outbox`** (only if §6 of doc 02 is enabled)
-- `id` (pk), `session_id`, `dedupe_key` (unique), `delta_payload` (jsonb), `status` (`pending|applied|failed`), `created_at`, `applied_at`, `attempts`.
+- ~~`execution_steps`~~ — **collapsed** into `executions.progress` (jsonb) + `last_completed_step_seq`. A separate table is only justified if the UI issues step-level SQL queries or step telemetry volume is large; if Phase 0 shows that need, promote `progress` to a child table then (flag in doc 08). Default: inline.
+- ~~`execution_events`~~ — **removed. Reuse the existing `chat_messages` table** for the UI event stream / broadcast replay. If Phase 0 finds execution telemetry is finer-grained than what belongs in the chat transcript, write that overflow to **GCS** (referenced from `result_refs`), not a new hot table.
+- ~~`analysis_jobs`~~ — **merged** into `executions` via `kind='analysis'`.
+- ~~`session_state_outbox`~~ — already out of scope (doc 02 §6, doc 08 Q2). Not created.
 
 ## 4. Repository & DatabaseService rules
 
-- One repository class per entity; methods are intention-revealing (`ExecutionRepository.mark_running`, `.append_event`, `.set_terminal`, …), not generic CRUD dumps.
+- One repository class per entity; methods are intention-revealing (`ExecutionRepository.mark_running`, `.update_progress`, `.set_terminal`, …), not generic CRUD dumps.
 - Repositories accept an injected async session; the **service layer** owns the transaction boundary (one unit-of-work per logical operation). Background workers open **short** transactions per write — never hold a transaction open across a hardware step.
 - **Isolation:** background-worker writes to execution tables and app reads must not deadlock with ADK's session writes. Because the two domains are in different tables and turns are serialized per session (doc 02 §4), contention is minimal by design.
 - Use `jsonb` for flexible/nested payloads; index `session_id`, `execution_id`, and `status` where queried. Keep large binary/raw data in **GCS**, storing only references in Postgres (doc 03 §5).
@@ -53,8 +59,8 @@ These implement the durable-execution decoupling (doc 02 §5). All app-owned, al
 
 ## 6. Data-integrity invariants
 
-- An `executions` row exists **before** any `ExecutionWorker` task starts (doc 02 §5) — the durable record is authoritative and independent of turn lifecycle.
-- `execution_events` is append-only; never updated in place.
-- Crash-recovery retries are bounded: `attempts` is incremented per resume and capped at **3** before the row goes to `failed` (doc 02 §7). Retries resume from `last_completed_step_seq`; completed steps are never re-run, and non-idempotent steps require confirmation before replay.
-- The `session_state_outbox` table and its idempotency (`dedupe_key`) apply **only if** the outbox is ever built — it is **out of scope** for this rewrite (doc 02 §6, doc 08 Q2). Do not create the table unless that decision is reopened.
+- An `executions` row exists **before** any `ExecutionWorker`/`AnalysisWorker` task starts (doc 02 §5) — the durable record is authoritative and independent of turn lifecycle.
+- The UI event stream lives in the existing `chat_messages` table (reused, unaltered); the rewrite adds no parallel event-log table.
+- `session_metadata` is reused for app session extras (sharing, etc.); execution/job status is never folded into it.
+- Crash-recovery retries are bounded: `attempts` is incremented per resume and capped at **3** before the row goes to `failed` (doc 02 §7). Retries resume from `last_completed_step_seq` (read from `progress`); completed steps are never re-run, and non-idempotent steps require confirmation before replay.
 - Foreign-key links from execution rows to `session_id` are **logical** references for querying/history; they must **not** create a write dependency from workers onto the ADK-owned `sessions` table (workers never write `sessions`).

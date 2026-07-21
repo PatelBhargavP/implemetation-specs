@@ -7,8 +7,10 @@ The system is one deployable FastAPI service (the **backend**) plus external man
 ```
 ┌──────────────────────────────────────────────────────────────────┐
 │  React SPA (TypeScript + Vite)  — unchanged contract               │
+│  Compiled build served BY the FastAPI service (index.html @ base;  │
+│  no separate UI server; app endpoints under /api/*) — doc 04 §10   │
 └───────────────┬───────────────────────────────┬──────────────────┘
-                │ HTTPS (REST)                   │ WSS (WebSocket)
+                │ HTTPS: / (SPA) + /api/* (REST)  │ WSS (WebSocket)
                 ▼                                ▼
         ┌───────────────────────  IAP  ───────────────────────┐
         │  Identity-Aware Proxy: authenticates, injects        │
@@ -31,7 +33,7 @@ The system is one deployable FastAPI service (the **backend**) plus external man
 │                                                                    │
 │  ── Integration layer ────────────────────────────────────────    │
 │   AdkRuntime (isolated ADK wrapper: Runner, session svc,           │
-│               artifact svc, agent registry, orchestration)         │
+│               artifact svc, agent tree built once, orchestration)  │
 │   Broadcaster (Redis pub/sub ↔ WebSocket registry)                 │
 │   HardwareGateway (pyrobot / MCP drivers, USB) — interface         │
 │                                                                    │
@@ -39,13 +41,16 @@ The system is one deployable FastAPI service (the **backend**) plus external man
 │   DatabaseService + Repositories (SQLAlchemy async)                │
 │                                                                    │
 │  ── Background workers (in-process asyncio tasks) ────────────     │
-│   ExecutionWorker   AnalysisWorker   OutboxReconciler              │
+│   ExecutionWorker   AnalysisWorker                                 │
+│   (OutboxReconciler: out of scope — doc 02 §6)                     │
 └───────┬───────────────────┬───────────────────┬──────────────────┘
         ▼                   ▼                   ▼
    AlloyDB (Postgres)    Redis / Fakeredis    GCS
    - ADK sessions        - WS conn mapping    - artifacts, reports,
-   - domain tables       - pub/sub broadcast    raw data
-   - execution tables
+   - existing app tables - pub/sub broadcast    raw data
+     (users, session_metadata,
+      chat_messages, …)
+   - executions (1 new table)
 ```
 
 ## 2. Layering rules (enforced; see doc 07)
@@ -71,7 +76,7 @@ The system is one deployable FastAPI service (the **backend**) plus external man
 
 1. User approves the plan (REST `POST /plans/{id}/execute` or a WS control message).
 2. `ExecutionService` creates an `execution` row (status `queued`) and enqueues an in-process `ExecutionWorker` task. It returns immediately (202/ack).
-3. `ExecutionWorker` runs the DAG deterministically via `HardwareGateway` (pyrobot/USB), **bypassing all LLMs**. Per step it: writes progress to `execution_steps`/`execution_events` (execution store, **not** ADK session), and publishes a live update via `Broadcaster`.
+3. `ExecutionWorker` runs the DAG deterministically via `HardwareGateway` (pyrobot/USB), **bypassing all LLMs**. Per step it: writes progress to `executions.progress` (the single execution store, **not** ADK session), and publishes a live update via `Broadcaster` (which is captured in the existing `chat_messages` table like any other UI event).
 4. On completion it writes terminal status + artifact refs (GCS) to the execution store. It does **not** write ADK session state directly — see doc 02 §5 for how results re-enter the conversation.
 
 ### 3.3 Data analysis (background)

@@ -13,15 +13,17 @@ app/
     deps.py               # FastAPI dependencies: auth context, db session, services
     errors.py             # exception→envelope mapping, handler registration
     middleware.py         # request id, logging, IAP auth extraction
-    rest/
-      sessions.py         # /sessions ...
-      plans.py            # /plans ...
-      executions.py       # /executions ...
-      artifacts.py        # /artifacts ...
-      health.py           # /healthz, /readyz
+    static.py             # mounts the compiled React build + serves index.html at base path (§10)
+    rest/                 # ALL mounted under the /api prefix (§9)
+      sessions.py         # /api/sessions ...
+      plans.py            # /api/plans ...
+      executions.py       # /api/executions ...
+      artifacts.py        # /api/artifacts ...
+      health.py           # /healthz, /readyz  (root, NOT under /api — infra probes)
     ws/
-      chat.py             # WebSocket endpoint + session-init lifecycle
+      chat.py             # WebSocket endpoint + session-init lifecycle (preserve current path)
       protocol.py         # WS message schemas (in/out), versioned
+  web/                    # compiled React build output (index.html + static assets), served by FastAPI
   services/               # business logic (doc 01 §2)
   integration/
     adk_runtime.py        # doc 03
@@ -34,7 +36,6 @@ app/
   workers/
     execution_worker.py
     analysis_worker.py
-    outbox_reconciler.py
     supervisor.py         # lifespan-managed task registry + crash recovery
   domain/
     exceptions.py         # typed domain exceptions
@@ -54,13 +55,14 @@ uv.lock                   # committed lockfile (uv)
 
 ## 2. App factory & lifespan
 
-- `create_app()` builds the FastAPI app, registers routers, middleware, and exception handlers, and installs a **lifespan** context that: constructs config, DatabaseService (engine/pool), Redis/Broadcaster, `AdkRuntime` (single Runner + shared session/artifact services), and the worker `supervisor`; and tears them down cleanly on shutdown (drain workers, close pools, close Redis).
+- `create_app()` builds the FastAPI app, registers routers, middleware, and exception handlers, and installs a **lifespan** context that: constructs config, DatabaseService (engine/pool), Redis/Broadcaster, the **API key manager service** (frozen, doc 00 §4 — constructed once, injected into `AdkRuntime`), `AdkRuntime` (single Runner + shared session/artifact services), and the worker `supervisor`; and tears them down cleanly on shutdown (drain workers, close pools, close Redis).
 - No global singletons constructed at import time. Everything is created in lifespan and exposed via the DI container so tests can substitute fakes.
 
 ## 3. Dependency injection
 
 - Use FastAPI `Depends` for request-scoped values: the authenticated `AuthContext`, a per-request DB session/unit-of-work, and service instances resolved from the container.
 - Services are singletons where stateless; DB sessions are per-request and closed by the dependency's teardown. Never share a DB session across requests or across background tasks.
+- The **API key manager service** (frozen, doc 00 §4) is a lifespan singleton in the container. Any component needing an API key (ADK model config, external clients) resolves it from the container and obtains keys through the manager's interface — **never** from env/config directly, and rotation-safely (doc 03 §2.1). Do not wrap it in a reimplementation; expose it as-is.
 
 ## 4. Data-transfer & validation
 
@@ -124,9 +126,22 @@ Server requirements:
 
 ## 9. REST surface (indicative; preserve current contracts where they exist)
 
-- `GET /healthz`, `GET /readyz` — liveness/readiness (readiness checks DB + Redis).
-- `GET /sessions`, `GET /sessions/{id}`, `POST /sessions`, `DELETE /sessions/{id}` — session metadata & history (read via `read_session_state`).
-- `GET /plans/{id}`, `POST /plans/{id}/execute` — plan retrieval & approval→execution trigger.
-- `GET /executions/{id}`, `GET /executions/{id}/events` — execution status/stream (reads execution store).
-- `GET /artifacts/{ref}` — signed-URL or proxied fetch of GCS artifacts (reports/plots/raw data).
-- Any endpoint the current frontend already calls must keep its path/shape unless doc 08 resolves a change.
+**All application endpoints live under the `/api` prefix** — this matches the current deployment (the frontend already calls `/api/*`). Mount every `rest/` router on an `APIRouter(prefix="/api")` (or an `/api` sub-app) so a single include point carries the prefix; do not hardcode `/api` into each path. Health/readiness are the deliberate exception: they stay at the root for load-balancer/IAP probes.
+
+- `GET /healthz`, `GET /readyz` — liveness/readiness (readiness checks DB + Redis). **Root, not under `/api`.**
+- `GET /api/sessions`, `GET /api/sessions/{id}`, `POST /api/sessions`, `DELETE /api/sessions/{id}` — session metadata & history (read via `read_session_state`).
+- `GET /api/plans/{id}`, `POST /api/plans/{id}/execute` — plan retrieval & approval→execution trigger.
+- `GET /api/executions/{id}` — execution/analysis status (reads the `executions` row). `GET /api/executions/{id}/events` — the UI event stream for a run, served from the existing `chat_messages` table filtered to that run (no new event table; doc 05 §3.1).
+- `GET /api/artifacts/{ref}` — signed-URL or proxied fetch of GCS artifacts (reports/plots/raw data).
+- **WebSocket path:** preserve the current frontend's WS path exactly (extract it in Phase 0, doc 06 §0); do not rename it to fit the `/api` convention if it differs today.
+- Any endpoint the current frontend already calls must keep its path/shape unless doc 08 resolves a change. The exact `/api/*` paths above are indicative — the **frozen contract is whatever the current frontend calls** (doc 00 §4).
+
+## 10. Serving the React SPA (single service — no separate UI server)
+
+The FastAPI app **is** the web server for the UI; there is no separate frontend service, and the rewrite does not add one (matches current deployment; doc 00 NG).
+
+- The compiled React build (Vite output: `index.html` + hashed `assets/`) is served by this same FastAPI process — mount `StaticFiles` for the asset directory and return `index.html` at the base path `/`.
+- **Ordering matters:** register the `/api/*` routers, the WebSocket route, and `/healthz`/`/readyz` **before** the static mount, so API and socket requests are never shadowed by static serving.
+- The UI currently has **no client-side router** (no deep-link routes). So the base path serves `index.html` and the asset mount serves files; **no SPA history-fallback catch-all is required today.** If client-side routing is added later, add a fallback that returns `index.html` for unknown non-`/api`, non-asset `GET`s — flag it in doc 08 at that point, don't pre-build it.
+- The build step (produce the React bundle into the served directory, e.g. `app/web/`) is wired into the Docker image build (doc 01 §7 deployment); the container ships a single artifact serving both API and UI.
+- Auth still applies uniformly: IAP sits in front of the whole service (doc 04 §5), so static assets and `/api/*` are both behind the same identity boundary; no separate auth for the static tier.
