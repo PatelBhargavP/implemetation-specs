@@ -1,6 +1,6 @@
-# FALSK Rewrite — 08 · Open Questions (need Bhargav's answers)
+# FALSK Rewrite — 08 · Open Questions (mostly resolved)
 
-> The interactive clarification did not complete, so the specs proceed on the assumptions in doc 00 §5. Each question below either confirms an assumption or resolves a genuine fork. Answers refine the specs; none block Phase 0–1 from starting.
+> Most questions are now answered by Bhargav (marked **Resolved** with the decision and where it's applied). Only **Q4** and **Q8** remain genuinely open; both are low-risk and do not block Phases 0–1.
 
 ## A. State, concurrency & background work (highest impact)
 
@@ -11,27 +11,31 @@
 
 ## B. Latency (Goal G2)
 
-5. **Numeric target** (doc 03 §7, doc 06 Gate 4): what p50/p95 turn time is "good enough"? (e.g. < 5 min p50.) Needed to define done.
-6. **Have you profiled at all?** If you have *any* signal on where the 30 min goes (LLM calls vs tool calls vs DB vs sequential waits), share it — it lets us skip straight to the real bottleneck instead of instrumenting from scratch.
-7. **Model tiering tolerance** (doc 03 §7): are you OK with using a faster/cheaper model for mechanical steps if outputs stay equivalent, or must every agent keep its exact current model?
+5. ~~Numeric target~~ **Resolved (Bhargav): p50 ≈ 15 min.** "Good enough" is a typical turn around **15 minutes** (down from ~30). Set as the Phase 4 acceptance target: **p50 ≤ 15 min** (doc 03 §7, doc 06 Gate 4). p95 not separately specified — track it but gate on p50.
+6. ~~Profiling~~ **Resolved (Bhargav): not formally profiled.** No existing breakdown, so the instrument-first step stands (doc 03 §7 step 1) — capture a real slow-turn trace before optimizing. Assumption A1 confirmed.
+7. ~~Model tiering tolerance~~ **Resolved (Bhargav): yes.** A faster/cheaper model may be used for **mechanical** steps provided outputs stay equivalent. Tiering is greenlit for extraction/validation/mechanical agents; the hard-reasoning agents keep their stronger model. Prompts stay frozen; only `model=` changes (doc 03 §7 step 3). Any tiering that risks a behavior change still gets flagged before shipping.
 
 ## C. Preservation & scope
 
-8. ~~Frozen-asset source~~ **Resolved:** the coding agent has full access to the old codebase (doc 00 A6); Phase 0 extracts frozen assets directly from it. Remaining sub-question: should the golden outputs for parity testing (doc 03 §8, doc 06 Gate 2) be captured from the **running old system** (preferred — captures true behavior) or reconstructed from logs/DB history?
-9. **Vertex AI** (doc 00 A4, doc 01 §6): confirm it's future-seam-only for this rewrite (default), not to be built now.
-10. **DB schema freeze** (doc 05): confirm additive-only is acceptable and the existing `sessions`/`users` and other domain tables must be preserved as-is. Any table you *do* want changed?
-11. **Frontend contract** (doc 04 §7/§9): is the React frontend also being rewritten, or must the new backend match the **current** frontend's REST/WS contracts exactly? (Specs assume: match current contracts.)
+8. ~~Frozen-asset source~~ **Resolved:** the coding agent has full access to the old codebase (doc 00 A6); Phase 0 extracts frozen assets directly from it. **Still open (low-risk):** should parity golden outputs (doc 03 §8, doc 06 Gate 2) be captured from the **running old system** (preferred — true behavior) or reconstructed from logs/DB history? Recommendation stands: capture from the running system before decommissioning.
+9. ~~Vertex AI~~ **Resolved (Bhargav): seam-only.** Keep it in mind so a future move is easy; **do not build it now** (doc 00 NG3, doc 01 §6). Confirms A4.
+10. ~~DB schema freeze~~ **Resolved (Bhargav): additive-only, no table changes.** No existing table needs to change; preserve `sessions`/`users` and all domain tables as-is; only additive migrations (doc 05 §5).
+11. ~~Frontend contract~~ **Resolved (Bhargav): frontend consumed as-is.** The React frontend is **not** rewritten; the new backend must match the current REST/WS contracts exactly (doc 04 §7/§9, doc 00 §4).
 
 ## D. Deployment & authz
 
-12. **Authz rules** (doc 06 §5): can a user see only their own sessions/artifacts, or are sessions shared within a team/org? Affects every session/artifact endpoint.
-13. **IAP JWT verification** (doc 04 §5): do you want the backend to cryptographically verify the `X-Goog-IAP-JWT-Assertion` (defense-in-depth), or is trusting the identity headers sufficient (your current approach)?
-14. **Cloud Run vs VM** (doc 01 §5): which is the actual target? It affects background-worker lifetime — Cloud Run can suspend/scale instances between requests, which can kill in-process background workers. **If Cloud Run is the target, in-process asyncio workers for long robot runs are risky** and we should discuss a min-instance / always-on worker deployment (still no new broker — just deployment config). This is the one place the "in-process workers" design has a real caveat.
+12. ~~Authz rules~~ **Resolved (Bhargav): owner-only + snapshot sharing.** A user sees **only their own** sessions/artifacts. Session sharing works by **creating a snapshot** and sharing it; the recipient uses that snapshot to **create a new session** of their own (no shared live session). Applied: owner-scoped authz on every session/artifact endpoint (doc 04 §5/§9); the snapshot-share mechanism is existing behavior preserved via `session_metadata` (doc 05 §2), extracted in Phase 0.
+13. ~~IAP JWT verification~~ **Resolved (Bhargav): trust headers.** Trusting IAP identity headers is sufficient; the backend does **not** cryptographically verify `X-Goog-IAP-JWT-Assertion`. (Kept as an easy future add-on, not built — doc 04 §5.)
+14. ~~Cloud Run vs VM~~ **Resolved (Bhargav): VM.** No hard platform commitment, but staying on **VM** for the long-lived WebSocket advantage. This makes the **in-process asyncio background workers viable as specified** — a VM instance is long-lived, so execution workers survive across turns (doc 01 §5, doc 02 §5). Note retained for the future: if Cloud Run is ever adopted, long robot runs need a min-instance/always-on worker deployment (config only, no new broker).
 
 ## E. Data analysis specifics
 
-15. Confirm the analysis pipeline scope for parity (doc 06 §6): standard curves, concentration calc, QC — anything else (e.g. specific plate-reader formats, report templates) that must match exactly?
+15. ~~Analysis pipeline~~ **Resolved (Bhargav): analysis is a sub-agent, preserved.** Data analysis is performed by an **ADK sub-agent** (its prompt + tools are frozen assets), **not** a separate LLM-bypassing background worker. Applied: analysis runs inside the single-invocation turn model as a frozen sub-agent in the agent tree; the earlier `AnalysisWorker`/analysis-as-background-job modeling is removed (doc 01 §3.3, doc 02 §3, doc 05 §3, doc 03 §1). Standard curves / concentration / QC math stays byte-faithful (doc 00 §4). *If* analysis on very large datasets ever needs to run detached from a turn, raise it then — default is in-turn.
 
 ---
 
-**My recommendation on ordering:** answer A1–A4 first — they unblock the highest-risk phases (2 & 3). B5/B7 can wait until Phase 4. D14 matters before you finalize the deployment target.
+**Remaining open (both low-risk, non-blocking):**
+- **Q4 — OCC root cause.** Confirm the old orchestration ran sub-agents as separate `Runner` invocations / reloaded the session per agent (the assumed cause the Phase 2 fix rests on). If it already ran one invocation and still hit OCC, share a stack trace / the orchestration code before Phase 2.
+- **Q8 — parity golden source.** Prefer capturing goldens from the running old system before it's decommissioned.
+
+Everything else is resolved and reflected in the specs.

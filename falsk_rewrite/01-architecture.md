@@ -29,7 +29,8 @@ The system is one deployable FastAPI service (the **backend**) plus external man
 │                                                                    │
 │  ── Service layer ────────────────────────────────────────────    │
 │   SessionService   TurnService     ExecutionService                │
-│   PlanService      AnalysisService ArtifactService  UserService    │
+│   PlanService      ArtifactService  UserService                    │
+│   (analysis lives in a frozen sub-agent + tools, not a service §3.3)│
 │                                                                    │
 │  ── Integration layer ────────────────────────────────────────    │
 │   AdkRuntime (isolated ADK wrapper: Runner, session svc,           │
@@ -41,7 +42,8 @@ The system is one deployable FastAPI service (the **backend**) plus external man
 │   DatabaseService + Repositories (SQLAlchemy async)                │
 │                                                                    │
 │  ── Background workers (in-process asyncio tasks) ────────────     │
-│   ExecutionWorker   AnalysisWorker                                 │
+│   ExecutionWorker   (robot DAG runs only)                          │
+│   (AnalysisWorker: none — analysis is an in-turn sub-agent §3.3)   │
 │   (OutboxReconciler: out of scope — doc 02 §6)                     │
 └───────┬───────────────────┬───────────────────┬──────────────────┘
         ▼                   ▼                   ▼
@@ -79,9 +81,9 @@ The system is one deployable FastAPI service (the **backend**) plus external man
 3. `ExecutionWorker` runs the DAG deterministically via `HardwareGateway` (pyrobot/USB), **bypassing all LLMs**. Per step it: writes progress to `executions.progress` (the single execution store, **not** ADK session), and publishes a live update via `Broadcaster` (which is captured in the existing `chat_messages` table like any other UI event).
 4. On completion it writes terminal status + artifact refs (GCS) to the execution store. It does **not** write ADK session state directly — see doc 02 §5 for how results re-enter the conversation.
 
-### 3.3 Data analysis (background)
+### 3.3 Data analysis (in-turn sub-agent, NOT a background worker)
 
-Same shape as 3.2: `AnalysisWorker` processes plate-reader data, writes standard curves/concentrations/QC + report artifacts to GCS and the execution/analysis tables, broadcasts progress, and never mutates ADK session state directly.
+Analysis is performed by a **frozen ADK sub-agent** with frozen tools (standard curves, concentration, QC), preserved verbatim (doc 08 Q15, doc 00 §4). It runs **inside the single-invocation turn** like any other agent — not as a decoupled LLM-bypassing worker. Its numeric results enter ADK session state via the agent's normal `state_delta`, and report/plot outputs are written to GCS via the artifact service (references recorded in state). There is no `AnalysisWorker`, no analysis job row. *(Only the robot **execution** loop in §3.2 is a background worker.)* If large-dataset analysis ever must run detached from a turn, raise it (doc 08 Q15) before changing this.
 
 ## 4. Concurrency & runtime model
 
@@ -91,7 +93,7 @@ Same shape as 3.2: `AnalysisWorker` processes plate-reader data, writes standard
 
 ## 5. Deployment topology
 
-- Containerized (Docker), deployed to **Cloud Run or a VM behind a load balancer** configured for **long-lived WebSocket / session affinity**.
+- Containerized (Docker), deployed to a **VM behind a load balancer** configured for **long-lived WebSocket / session affinity** (target confirmed — doc 08 Q14; VM chosen for the persistent-socket advantage). A VM instance is long-lived, so the **in-process asyncio execution workers survive across turns as designed** (doc 02 §5). *Future note:* if Cloud Run is ever adopted, long robot runs would need a min-instance/always-on worker config (deployment only, no new broker) — not built now.
 - **Redis** provides (a) WebSocket-connection → instance mapping and (b) cross-instance pub/sub so any instance can broadcast to a socket homed on another. `Fakeredis` is the local/dev drop-in behind the same `Broadcaster` interface.
 - **AlloyDB (PostgreSQL)** for all relational state. **GCS** for artifacts/reports/raw data.
 - Target scale: **4–10 concurrent users** (A3). Horizontal scale is supported by the Redis broadcast fabric but not a design driver.

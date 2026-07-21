@@ -63,9 +63,9 @@ This rewrite is a **greenfield reimplementation** on **FastAPI**, using **Google
 These were defaulted because the interactive clarification did not complete; doc 08 asks the user to confirm. **Do not treat assumptions as settled requirements where doc 08 flags them.**
 
 - **A1** — The 30-min latency has **not** been formally profiled. The spec therefore mandates instrumentation *before* optimization (doc 03 §7).
-- **A2** — Background writers include the **plan-execution loop**, **long-running agent subtasks**, and **async data-analysis jobs**. The state design treats all three with one pattern (doc 02 §5).
+- **A2** — The background writer that matters is the **plan-execution loop** (robot DAG run, bypasses LLMs, can outlast its turn); it owns the durable `executions` store (doc 02 §5). **Analysis is not a background writer** — it is an in-turn frozen sub-agent (doc 08 Q15).
 - **A3** — Concurrency scale: **4–10 parallel users**, few sessions each. The design targets correctness at this scale with a single-region deployment; it does not need global horizontal scale.
-- **A4** — Deployment stays on **Cloud Run / VM behind a load balancer** with sticky WebSocket routing; **Vertex AI is future-proofed, not built** (NG3, G6).
+- **A4** — Deployment stays on a **VM behind a load balancer** with sticky WebSocket routing (confirmed — doc 08 Q14); **Vertex AI is future-proofed, not built** (NG3, G6).
 - **A5** — One active **turn per session at a time** is acceptable (a user does not need two concurrent in-flight prompts on the same session). This underpins the per-session serialization in doc 02.
 - **A6** — The coding agent **has read access to the old codebase**. All frozen assets (prompts, tool contracts, schema, API/WS contracts) are extracted directly from it during Phase 0 (doc 06 §0); no external export is needed. Greenfield still means a **new repo/structure** — old code is a *reference and extraction source*, never copy-paste material for harness code.
 

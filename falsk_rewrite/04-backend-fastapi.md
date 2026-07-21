@@ -74,14 +74,19 @@ uv.lock                   # committed lockfile (uv)
 FALSK does not authenticate users itself — **IAP** does (NG4). The backend trusts IAP and records identity.
 
 - **Middleware/dependency `require_identity`:**
-  1. Read IAP identity headers (`X-Goog-Authenticated-User-Id`, `X-Goog-Authenticated-User-Email`, and — where available — the signed `X-Goog-IAP-JWT-Assertion`). Extract stable user id + email.
+  1. Read IAP identity headers (`X-Goog-Authenticated-User-Id`, `X-Goog-Authenticated-User-Email`). Extract stable user id + email. **Trusting these headers is sufficient** (confirmed — doc 08 Q13); the backend does **not** cryptographically verify `X-Goog-IAP-JWT-Assertion`.
   2. **Upsert the user** into the `users` table (idempotent) and **cache** the record in Redis keyed by user id, with a TTL, to avoid a DB hit per request. Cache-aside: check Redis → miss → DB upsert/read → populate Redis.
   3. Build an `AuthContext(user_id, email, roles?)` and attach it to the request (context var / `request.state`) for downstream use.
 - **Fail-safe behavior (production trusts IAP, but code must not assume it):**
   - If identity headers are entirely absent in a context that requires them → `401 UNAUTHENTICATED`. Do **not** silently allow anonymous access.
   - Provide a **config-gated local-dev bypass** (`AUTH_MODE=local`) that injects a fixed dev identity, so the app runs without IAP locally. This bypass must be impossible to enable in the cloud profile.
-  - Optionally verify the IAP JWT assertion signature/audience when configured (recommended for defense-in-depth); behind a config flag so local/dev without IAP still works.
+  - JWT-assertion verification is **not built** (doc 08 Q13) — leave a documented seam so it can be added later behind a config flag if defense-in-depth is ever wanted.
 - **WebSocket auth:** identity is extracted **at connection time** (IAP headers are present on the WS upgrade request) and bound to the connection. Every message on that socket inherits the connection's `AuthContext`; do not re-trust per-message client-supplied identity.
+
+### 5.1 Authorization — owner-only, with snapshot sharing (doc 08 Q12)
+
+- A user may access **only their own** sessions and artifacts. Every session/artifact/execution endpoint filters by the caller's `user_id`; a request for another user's resource returns `404` (not `403`, to avoid leaking existence). Enforce this in the service layer, not just the router.
+- **Sharing is by snapshot, not by shared live session.** To share, a user creates a **snapshot** of a session and shares it; the recipient uses that snapshot to **create a new session** they then own. There is no jointly-owned live session. The snapshot create/consume mechanism is **existing behavior preserved** (backed by `session_metadata` or its current table — extract in Phase 0, doc 06 §0). The only authz special-case is: a user may read a snapshot that was shared with them for the purpose of instantiating their own new session.
 
 ## 6. Global exception handling & structured errors (Goal G4)
 

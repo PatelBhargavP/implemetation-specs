@@ -133,7 +133,7 @@ All of these execute inside the same `InvocationContext`, share one session, and
 4. **Trim context.** Avoid re-sending unbounded history/state each call; rely on `temp:` for scratch and keep only necessary keys in persisted state. Ensure tools return compact, structured results rather than large blobs (store blobs as artifacts, pass references).
 5. **Stream early.** Broadcast the DAG/plan incrementally as events arrive so perceived latency drops even before total time does.
 
-**Acceptance for G2:** a documented before/after trace showing where time went and the effect of parallelization + tiering. A specific numeric target (e.g. "< 5 min p50") should be set with the user (doc 08) rather than assumed.
+**Acceptance for G2:** a documented before/after trace showing where time went and the effect of parallelization + tiering, meeting the target **p50 ≤ 15 min** per turn (confirmed — doc 08 Q5; down from ~30 min). Track p95 but gate on p50. Model tiering for mechanical steps is approved (doc 08 Q7); no formal profile exists yet (doc 08 Q6), so the instrument-first step is mandatory.
 
 ## 8. Testing the ADK layer
 

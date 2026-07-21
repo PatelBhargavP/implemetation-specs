@@ -33,7 +33,7 @@
 ## 3. Phase 3 — Execution & analysis (background, decoupled)
 
 - Implement `ExecutionService` + `ExecutionWorker` + the single `executions` table (doc 05 §3), driving `HardwareGateway` (real pyrobot/USB where available; a deterministic simulator otherwise). First check Phase 0 inventory — if the old schema already has a suitable execution/job table, extend it additively instead of adding a new one.
-- Implement `AnalysisService` + `AnalysisWorker` (writes to the same `executions` table with `kind='analysis'`; reuses existing `chat_messages` for UI events — no new tables).
+- **Analysis is a frozen sub-agent, not a worker** (doc 08 Q15): it's ported in Phase 2 as part of the agent tree (doc 03 §1) and runs in-turn. No `AnalysisWorker`, no analysis table. Nothing to build here beyond confirming the analysis sub-agent's tools produce byte-faithful curves/concentration/QC (parity, doc 06 §6).
 - Implement the worker `supervisor` (lifespan-managed tasks + crash recovery, doc 04 §1 / doc 02 §7).
 - Implement result re-entry via tools (doc 02 §5 pull model). The outbox + reconciler is **out of scope** (doc 08 Q2) — do not build it; the live UI stream is served by the Broadcaster.
 - Implement crash recovery with **bounded 3-attempt retry** resuming from `last_completed_step_seq`, honoring the non-idempotent-step safety rule (doc 02 §7).
@@ -43,12 +43,12 @@
 
 - Land tracing/instrumentation; capture a real slow-turn breakdown (doc 03 §7 step 1). **Required artifact:** the before-trace.
 - Convert independent experts to `ParallelAgent`; apply model tiering where safe.
-- **Gate 4:** documented before/after with the agreed numeric target (set in doc 08). No behavior regression vs Gate 2 golden outputs.
+- **Gate 4:** documented before/after meeting **p50 ≤ 15 min** per turn (doc 08 Q5). No behavior regression vs Gate 2 golden outputs.
 
 ## 5. Phase 5 — Hardening & cutover
 
 - Full error-path coverage, load test at 4–10 concurrent users with live executions, WebSocket reconnection/affinity test behind the load balancer, artifact serving, readiness/liveness under dependency failure.
-- Security pass: IAP JWT verification (if enabled), no secret/stack leakage, authz on session/artifact access (a user can only see their own sessions/artifacts — confirm rule in doc 08).
+- Security pass: no secret/stack leakage; **owner-only authz** on session/artifact/execution access (other users' resources return 404), and the snapshot-sharing path (doc 04 §5.1, doc 08 Q12). IAP JWT verification is **not** built (trust headers — doc 08 Q13).
 - **Cutover:** deploy alongside the old system; route a subset of users; compare; then switch. Because the DB schema is preserved and additive, both systems can read the same `sessions`/`users` during transition (validate ADK session compatibility first — doc 08).
 - **Gate 5:** parity + latency + robustness gates all green in a production-like environment; rollback plan documented.
 
