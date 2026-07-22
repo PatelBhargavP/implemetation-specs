@@ -8,7 +8,7 @@
 app/agents/
   __init__.py
   factory.py             # build_root_agent(config) -> BaseAgent : composes the tree EXPLICITLY, once
-  orchestrator.py        # root agent definition + composition of sub-agents
+  supervisor_agent.py    # root agent — the "Supervisor Agent" (a.k.a. orchestrator); its name is FROZEN
   planner/
     agent.py             # def build_planner(cfg) -> LlmAgent (model, instruction=FROZEN prompt, tools)
     prompt.py            # FROZEN instruction text, verbatim
@@ -100,7 +100,9 @@ Implementation `AdkRuntimeImpl` holds a **single process-wide `Runner`** (or a s
 
 ## 4. Orchestration — single invocation, native ADK composition
 
-The orchestrator is the **root agent** of the one invocation per turn (doc 02 P1). Compose sub-agents with ADK's native constructs — **do not** call one agent from another via a fresh `Runner`:
+> **Naming:** the root/orchestrator agent is called the **Supervisor Agent** in the codebase (legacy and new). Throughout these specs "orchestrator" is a **role label** for this same agent — not a second agent and not a rename. Its ADK `name` (and prompt) is a **frozen asset**: extract the exact identifier string from `legacy/` in Phase 0 and preserve it byte-identical, because ADK resolves sub-agent delegation/transfer by `agent.name` (doc 00 §4, doc 03 §1.1). Do **not** confuse it with the background-worker supervisor (`workers/worker_supervisor.py`, doc 04 §1) — different thing entirely.
+
+The **Supervisor Agent (orchestrator)** is the **root agent** of the one invocation per turn (doc 02 P1). Compose sub-agents with ADK's native constructs — **do not** call one agent from another via a fresh `Runner`:
 
 - **`sub_agents` / transfer** for delegation where the orchestrator hands control to a specialist and back.
 - **`AgentTool`** to expose a specialist agent as a callable tool of the orchestrator when it should be invoked like a function and its result folded back.

@@ -69,8 +69,8 @@ The system is one deployable FastAPI service (the **backend**) plus external man
 
 1. Frontend sends a user prompt over the session's WebSocket (session-init lifecycle in doc 04 §7).
 2. WS router resolves the authenticated user (from IAP headers captured at connect) and the `session_id`, then hands off to `TurnService.run_turn(...)`.
-3. `TurnService` acquires the **per-session turn lock** (doc 02 §4), then invokes `AdkRuntime.run_turn(...)` — **one** `Runner.run_async` invocation whose root is the orchestrator agent.
-4. The orchestrator composes planner + hardware-expert sub-agents *inside the same invocation* (ADK sub-agents / `ParallelAgent` for independent experts). All agents share one session; ADK applies each event's `state_delta` via `append_event` incrementally and serially. **No sub-agent opens its own session or its own runner.**
+3. `TurnService` acquires the **per-session turn lock** (doc 02 §4), then invokes `AdkRuntime.run_turn(...)` — **one** `Runner.run_async` invocation whose root is the **Supervisor Agent** (the orchestrator/root agent; name frozen — doc 03 §4).
+4. The Supervisor Agent composes planner + hardware-expert sub-agents *inside the same invocation* (ADK sub-agents / `ParallelAgent` for independent experts). All agents share one session; ADK applies each event's `state_delta` via `append_event` incrementally and serially. **No sub-agent opens its own session or its own runner.**
 5. As events stream, `AdkRuntime` forwards them to the `Broadcaster` (Redis publish) which pushes to the owning WebSocket. The DAG plan is streamed to the frontend for visualization.
 6. When the invocation completes, the turn lock is released. Final state is already persisted by ADK. `TurnService` returns.
 

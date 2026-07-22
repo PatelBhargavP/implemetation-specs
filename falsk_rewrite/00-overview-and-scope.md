@@ -42,6 +42,7 @@ This rewrite is a **greenfield reimplementation** on **FastAPI**, using **Google
 **FROZEN (ported verbatim; behavior must be identical):**
 
 - **Agent prompts / instructions** — every system/agent instruction string. Copied byte-for-byte into the new `agents/` package. If the current code composes prompts from fragments, preserve the composition logic so the *rendered* prompt is identical.
+- **Agent names / identifiers** — each ADK agent's `name` is frozen (ADK resolves delegation/transfer by name, so a rename silently breaks routing). In particular the root/orchestrator agent is the **Supervisor Agent** — preserve its exact identifier from `legacy/` (doc 03 §4).
 - **Tool contracts** — each tool's name, parameter schema, semantics, and return shape. Tool *implementations* may be re-homed into the new module layout, but their signatures and observable behavior must not change.
 - **Domain algorithms** — resource/deck estimation math, standard-curve/concentration/QC calculations, and the DAG execution semantics (`pyrobot` driver protocol). Port logic faithfully; wrap, don't rewrite, the numerics.
 - **Database schema & Alembic history** — existing tables (including `sessions`, `users`) and migration chain are preserved; changes are additive (doc 05).

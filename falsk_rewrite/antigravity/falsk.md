@@ -17,8 +17,11 @@ spec disagree, the spec wins. When a guardrail blocks you, **STOP and record it 
 
 ## Hard rules (never violate — full list + rationale in doc 07)
 
-1. **Frozen assets are byte-identical.** Agent prompts and tool signatures/return shapes are
-   copied verbatim from `legacy/`. No rewording, no "cleanup", no refactor of prompt text.
+1. **Frozen assets are byte-identical.** Agent prompts, tool signatures/return shapes, **and agent
+   names/identifiers** are copied verbatim from `legacy/` (ADK routes delegation by `agent.name`, so
+   a rename breaks routing). The root/orchestrator agent is the **Supervisor Agent** — preserve its
+   exact name. No rewording, no "cleanup". (NB: the background-worker "worker supervisor" is a
+   different thing — don't merge the two.)
 2. **Never import from `legacy/`.** It is read-only reference. Frozen assets are *copied out*
    (with a content hash recorded in `INVENTORY.md`), never imported or referenced. Do not edit
    anything under `legacy/`.

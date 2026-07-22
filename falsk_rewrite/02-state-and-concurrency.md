@@ -14,7 +14,7 @@ The current pain comes from two distinct problems that the bespoke "Turn-Aware" 
 
 ## 2. Design principles
 
-- **P1 — One invocation per turn.** A planning turn is a single `Runner.run_async` invocation. Orchestrator + planner + hardware experts are ADK **sub-agents composed inside that invocation**, never separate runner calls or separate sessions. This makes ADK the single serial writer and eliminates intra-turn OCC (Problem A).
+- **P1 — One invocation per turn.** A planning turn is a single `Runner.run_async` invocation. The **Supervisor Agent** (root/orchestrator) + planner + hardware experts are ADK **sub-agents composed inside that invocation**, never separate runner calls or separate sessions. This makes ADK the single serial writer and eliminates intra-turn OCC (Problem A).
 - **P2 — Never mutate `session.state` directly.** All state changes flow through ADK's sanctioned paths: `output_key`, `EventActions.state_delta`, or `CallbackContext`/`ToolContext` mutations (which ADK folds into the event's `state_delta`). A `Session` object read outside a managed context is **read-only**. Direct mutation is not persisted and is forbidden (doc 07 hard rule).
 - **P3 — Separate two state domains.** *Conversational/agent state* (ADK sessions) and *execution state* (running robot plans) are different lifecycles and live in different stores. The execution worker owns execution state and never touches ADK session state directly (fixes Problem B). (Analysis is agent state, not a separate domain — it's an in-turn sub-agent.)
 - **P4 — One turn at a time per session.** Turns on the same `session_id` are serialized by a per-session lock (A5). This removes cross-turn OCC on the session row without global locking.

@@ -36,7 +36,7 @@ app/
   workers/
     execution_worker.py
     analysis_worker.py
-    supervisor.py         # lifespan-managed task registry + crash recovery
+    worker_supervisor.py  # lifespan-managed task registry + crash recovery (NOT the Supervisor Agent — doc 03 §4)
   domain/
     exceptions.py         # typed domain exceptions
     schemas.py            # pydantic DTOs for API I/O
@@ -55,7 +55,7 @@ uv.lock                   # committed lockfile (uv)
 
 ## 2. App factory & lifespan
 
-- `create_app()` builds the FastAPI app, registers routers, middleware, and exception handlers, and installs a **lifespan** context that: constructs config, DatabaseService (engine/pool), Redis/Broadcaster, the **API key manager service** (frozen, doc 00 §4 — constructed once, injected into `AdkRuntime`), `AdkRuntime` (single Runner + shared session/artifact services), and the worker `supervisor`; and tears them down cleanly on shutdown (drain workers, close pools, close Redis).
+- `create_app()` builds the FastAPI app, registers routers, middleware, and exception handlers, and installs a **lifespan** context that: constructs config, DatabaseService (engine/pool), Redis/Broadcaster, the **API key manager service** (frozen, doc 00 §4 — constructed once, injected into `AdkRuntime`), `AdkRuntime` (single Runner + shared session/artifact services), and the **worker supervisor** (`workers/worker_supervisor.py` — distinct from the Supervisor *Agent*); and tears them down cleanly on shutdown (drain workers, close pools, close Redis).
 - No global singletons constructed at import time. Everything is created in lifespan and exposed via the DI container so tests can substitute fakes.
 
 ## 3. Dependency injection
@@ -79,11 +79,23 @@ FALSK does not authenticate users itself — **IAP** does (NG4). The backend tru
   3. Build an `AuthContext(user_id, email, roles?)` and attach it to the request (context var / `request.state`) for downstream use.
 - **Fail-safe behavior (production trusts IAP, but code must not assume it):**
   - If identity headers are entirely absent in a context that requires them → `401 UNAUTHENTICATED`. Do **not** silently allow anonymous access.
-  - Provide a **config-gated local-dev bypass** (`AUTH_MODE=local`) that injects a fixed dev identity, so the app runs without IAP locally. This bypass must be impossible to enable in the cloud profile.
   - JWT-assertion verification is **not built** (doc 08 Q13) — leave a documented seam so it can be added later behind a config flag if defense-in-depth is ever wanted.
-- **WebSocket auth:** identity is extracted **at connection time** (IAP headers are present on the WS upgrade request) and bound to the connection. Every message on that socket inherits the connection's `AuthContext`; do not re-trust per-message client-supplied identity.
 
-### 5.1 Authorization — owner-only, with snapshot sharing (doc 08 Q12)
+### 5.1 Local development without IAP (config-gated bypass)
+
+Locally there is no IAP in front of the app, so **no `X-Goog-Authenticated-User-*` headers arrive.** This is handled by an explicit profile switch, not by weakening `require_identity`:
+
+- **Profiles** (pydantic-settings, doc 04 §1 `config.py`): `local | cloud | test`. Behavior is chosen by profile, never by inspecting request headers.
+- **`AUTH_MODE=local`** (valid only in the `local`/`test` profiles): `require_identity` skips header parsing and injects a **fixed, configurable dev identity** (`DEV_USER_ID` / `DEV_USER_EMAIL`, defaulting to a dev user), then proceeds through the normal upsert + `AuthContext` path. The rest of the app is identical to production — only the identity *source* differs. So local runs need zero IAP headers.
+- **`AUTH_MODE=iap`** (the only value permitted in the `cloud` profile): identity comes solely from IAP headers; absence → `401`.
+- **Bypass cannot run in production — enforced two ways:**
+  1. **Startup assertion:** at app construction, if `profile == cloud` and `AUTH_MODE != iap`, **refuse to boot** (raise, fail the container health check). The unsafe combination can never start, so it can't be toggled at runtime.
+  2. **Not header-triggerable:** the bypass keys off the *profile/config*, never off a request header or query param, so no incoming request can activate it. (And in cloud, IAP sits in front, so unauthenticated requests don't even reach the app — defense in depth.)
+- **CI check:** a test asserts that building the app in the `cloud` profile with `AUTH_MODE=local` raises (this is guardrail-tested — doc 06 Gate 1, doc 07 §5).
+
+- **WebSocket auth:** identity is bound **at connection time** and every message inherits the connection's `AuthContext` (never re-trust per-message client identity). In production the IAP headers are present on the WS upgrade request; **locally the same `AUTH_MODE=local` dev identity is applied at connect**, so sockets work without IAP too.
+
+### 5.2 Authorization — owner-only, with snapshot sharing (doc 08 Q12)
 
 - A user may access **only their own** sessions and artifacts. Every session/artifact/execution endpoint filters by the caller's `user_id`; a request for another user's resource returns `404` (not `403`, to avoid leaking existence). Enforce this in the service layer, not just the router.
 - **Sharing is by snapshot, not by shared live session.** To share, a user creates a **snapshot** of a session and shares it; the recipient uses that snapshot to **create a new session** they then own. There is no jointly-owned live session. The snapshot create/consume mechanism is **existing behavior preserved** (backed by `session_metadata` or its current table — extract in Phase 0, doc 06 §0). The only authz special-case is: a user may read a snapshot that was shared with them for the purpose of instantiating their own new session.
