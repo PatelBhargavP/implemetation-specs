@@ -7,7 +7,7 @@
 1. ~~Concurrent turns on one session~~ **Resolved (Bhargav):** reject the second prompt with a structured `SESSION_BUSY` (409) error. No queuing. (Applied in doc 02 §4 and doc 04 §7.)
 2. ~~Immediate in-session reflection~~ **Resolved (Bhargav): "UI needs stream of events displayed."** Interpretation: the requirement is the **live UI event stream**, which is fully covered by the Broadcaster path (workers publish execution/analysis events to Redis → WebSocket → UI) and does **not** require the outbox — workers stream to the UI without ever touching ADK session state (doc 02 §5 rule 3, doc 04 §8). The outbox (doc 02 §6) is only for injecting results into the *agent's conversational memory* before the user's next prompt; that is **not built** — agents pick up results via tools on the next turn (pull model). If a proactive *agent comment* (not just UI events) on job completion is ever needed, reopen this and build the outbox.
 3. ~~Crash-recovery policy~~ **Resolved (Bhargav): retry up to 3 times.** On process crash/restart, an interrupted execution is automatically retried up to **3 attempts** (attempt counter on the `executions` row); after the third failure it is marked `failed` and requires explicit user re-trigger. Safety constraint added in doc 02 §7: retries resume from the **last completed DAG step boundary** (never blind-re-run completed liquid-handling steps), and any step that is not verifiably idempotent must require hardware-state confirmation before resuming.
-4. **Confirm the OCC root cause.** Is it true that today's orchestration runs sub-agents as **separate `Runner` invocations** (or otherwise reloads the session per agent)? If your current code already runs one invocation and you *still* get OCC, there's a different cause and I need a stack trace / the relevant orchestration code.
+4. ~~Confirm the OCC root cause~~ **Resolved (Bhargav): the session was NOT reloaded per sub-agent.** So the "each agent reloads a different snapshot" theory is disconfirmed. Delegation is via frozen `call_<agent_name>` tools (doc 09); agents shared one in-turn reference. The concurrency pain therefore came from **Problem B (background writes crossing the turn boundary)** and/or delegated results reaching the session via a separate write — not per-agent reloads. The rewrite is robust to both: one invocation + in-invocation `call_*` AgentTools (single serial writer intra-turn) and execution decoupling (doc 02 §5) for Problem B. **Action:** Phase 2 must reproduce the *actual* original OCC trigger and prove it's gone (doc 06 Gate 2/3, doc 09 §5). If you can point at the specific place OCC surfaced (background write vs a delegated persist), note it for that test.
 
 ## B. Latency (Goal G2)
 
@@ -34,8 +34,8 @@
 
 ---
 
-**Remaining open (both low-risk, non-blocking):**
-- **Q4 — OCC root cause.** Confirm the old orchestration ran sub-agents as separate `Runner` invocations / reloaded the session per agent (the assumed cause the Phase 2 fix rests on). If it already ran one invocation and still hit OCC, share a stack trace / the orchestration code before Phase 2.
+**Remaining open (low-risk, non-blocking):**
 - **Q8 — parity golden source.** Prefer capturing goldens from the running old system before it's decommissioned.
+- **Q4 follow-up (optional):** if you can pinpoint *where* OCC actually surfaced (a background write, or a delegated-agent persist), note it so Phase 2's regression test targets the real trigger (doc 09 §5). Not a blocker.
 
-Everything else is resolved and reflected in the specs.
+Everything else is resolved and reflected in the specs (delegation & shared-knowledge tools now covered by doc 09).

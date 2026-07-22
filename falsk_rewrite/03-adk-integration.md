@@ -104,8 +104,10 @@ Implementation `AdkRuntimeImpl` holds a **single process-wide `Runner`** (or a s
 
 The **Supervisor Agent (orchestrator)** is the **root agent** of the one invocation per turn (doc 02 P1). Compose sub-agents with ADK's native constructs — **do not** call one agent from another via a fresh `Runner`:
 
-- **`sub_agents` / transfer** for delegation where the orchestrator hands control to a specialist and back.
-- **`AgentTool`** to expose a specialist agent as a callable tool of the orchestrator when it should be invoked like a function and its result folded back.
+> **Delegation is tool-based (doc 09).** FALSK's frozen prompts delegate by calling **`call_<agent_name>` tools** (e.g. `call_planner`), not via implicit `transfer`. Implement each as an **`AgentTool`** (or in-invocation runner) under the **exact frozen tool name**, running the sub-agent inside the current invocation. See doc 09 for the full mechanism, the shared-knowledge tools, and the guardrails. The constructs below are the ADK building blocks those tools are built from.
+
+- **`AgentTool`** — the primary mechanism: expose each specialist agent as a `call_<agent_name>` tool of the Supervisor, invoked like a function with its result folded back, **within the one invocation** (doc 09 §2).
+- **`sub_agents`** composition wires the tree; ADK's implicit `transfer` is **not** the delegation path here (the `call_*` tools are).
 - **`ParallelAgent`** for **independent** hardware-expert / validation steps that can run concurrently within the invocation (primary latency lever — §7).
 - **`SequentialAgent`** for fixed ordered pipelines (e.g. parse → design → estimate → validate) where each stage feeds the next.
 

@@ -43,10 +43,12 @@ Run **one phase at a time**. For each phase:
 
 ## 2. Phase 0 kickoff prompt (paste verbatim the first time)
 
-> Read `docs/specs/` docs 00–08 in order. Do **not** write app code yet. Execute Phase 0
+> Read `docs/specs/` docs 00–09 in order. Do **not** write app code yet. Execute Phase 0
 > (doc 06 §0): (1) confirm all old code is in `legacy/`; (2) produce `INVENTORY.md` of every frozen
-> asset — agent prompts (and any prompt-composition logic), tool signatures/returns, DB schema +
-> Alembic history, REST `/api/*` paths, and the WebSocket path/message shapes — each with its
+> asset — agent prompts (and any prompt-composition logic), tool signatures/returns **including the
+> `call_<agent_name>` delegation tools and the shared-knowledge tools (doc 09) plus the
+> shared-knowledge state key + lifetime**, the API key manager interface, DB schema + Alembic
+> history, REST `/api/*` paths, and the WebSocket path/message shapes — each with its
 > `legacy/`-relative source path and a content hash; (3) scaffold the doc 04 §1 layout with `uv`,
 > empty routers, health endpoints, structured-error envelope stub, logging/tracing, and CI wired
 > with the doc 07 §5 gates (state-write, adk-import scope, legacy-import scope, prompt-hash,

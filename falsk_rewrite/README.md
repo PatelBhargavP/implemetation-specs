@@ -16,7 +16,8 @@ A spec suite for rewriting FALSK (lab-automation experiment planner) from the cu
 - **05 — Data model.** Preserved schema (reuses `chat_messages`, `session_metadata`) + one additive `executions` table, Alembic policy.
 - **06 — Migration plan.** Phased, gated, parity-checked.
 - **07 — Guardrails.** Binding rules + CI enforcement for the coding agent.
-- **08 — Open questions.** Needs Bhargav's answers; assumptions are flagged.
+- **08 — Open questions.** Mostly resolved; assumptions flagged.
+- **09 — Agent delegation & shared knowledge.** How the frozen `call_<agent_name>` and shared-knowledge tools map onto raw ADK (single-invocation AgentTools + session state).
 
 ## Key architectural decisions (rationale in the docs)
 - **One `Runner.run_async` invocation per turn**, sub-agents composed inside it → ADK is the single serial state writer → intra-turn OCC is structurally impossible (doc 02 §1–4).

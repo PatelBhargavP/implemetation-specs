@@ -64,6 +64,7 @@ These are binding and are reflected in the `falsk_rewrite` spec set. Ordered by 
 6. **One new table only: `executions`.** Durable, turn-independent record of **robot plan executions** — the fix for challenge #2, not logging and not speed. Per-step DAG progress inlined as jsonb. **Reuses** existing `chat_messages` (UI events) and `session_metadata` (session extras/sharing). Dropped: `execution_events`, `execution_steps`, `analysis_jobs`, `session_state_outbox`. If a suitable old table exists, extend it additively instead. (doc 05 §3.)
 6b. **Analysis is a frozen sub-agent, not a background job** (doc 08 Q15). It runs in-turn like other agents; outputs go to ADK session state + GCS artifacts. No `AnalysisWorker`, no analysis table, no `kind` discriminator on `executions`. Only the robot execution loop is a background worker. (doc 01 §3.3, doc 02 §3.)
 7. **Turn-Aware removed** (see resolution above). (doc 02 §8.)
+7b. **Delegation is via frozen `call_<agent_name>` tools; shared knowledge is ADK state** (doc 09). The Supervisor Agent delegates by calling `call_*` tools (implemented as in-invocation ADK `AgentTools`, exact frozen names — never a new Runner). The old `SharedContext` blob becomes a session-state key managed by the frozen `clear_/get_/update_shared_knowledge` tools; the class is removed, the data preserved. These tools are frozen contracts (named by frozen prompts). (doc 09, doc 03 §4, doc 02 §3.)
 8. **Agents built once, explicitly.** The agent tree is built once at startup (lifespan) and reused across all sessions/turns — **no per-session init**. Composition is explicit in `agents/factory.py`; the root/orchestrator agent is the **Supervisor Agent** (name frozen). The old `AGENT_CONFIG` name→directory **dispatch dictionary is removed** (ADK resolves delegation by `agent.name`); `agent_config.yaml` is **kept** as the factory's declarative per-agent tuning table (model/tier, temperature, token limits, tool attachment). Prompts/tools **and agent names** stay frozen. (doc 00 §4, doc 03 §1.1–§1.2, §4.)
 9. **Single service; `/api/*` + SPA.** No separate UI server and none added. All app endpoints live under `/api/*`; FastAPI serves the compiled React `index.html` from the base path (static mount registered after API/WS/health). The UI has no client-side router, so no history-fallback is added now. Health/readiness stay at root. (doc 04 §9–§10, doc 00 NG7.)
 10. **`uv` for packaging.** `pyproject.toml` + committed `uv.lock`; `uv sync --frozen`; `uv run`. No `requirements.txt`/Poetry/`pip install`. (doc 04 §1, doc 06 §0, doc 07.)
@@ -77,9 +78,10 @@ These are binding and are reflected in the `falsk_rewrite` spec set. Ordered by 
 
 **Resolved since first draft:** O2 latency target → **p50 ≤ 15 min** (Q5); O5 deployment → **VM** (Q14); plus Q7 (tiering OK), Q9 (Vertex seam-only), Q10 (no schema changes), Q11 (frontend as-is), Q12 (owner-only + snapshot share), Q13 (trust headers), Q15 (analysis is a sub-agent).
 
-**Still open (both low-risk, non-blocking):**
+**O1 — OCC root cause (doc 08 Q4): RESOLVED.** Session was **not** reloaded per sub-agent; delegation is via `call_*` tools (doc 09). OCC came from background writes (Problem B) and/or delegated persists, not per-agent reloads. Single-invocation + in-invocation `call_*` AgentTools + execution decoupling fix both. Phase 2 must reproduce the real trigger (doc 09 §5).
 
-- **O1 — OCC root cause (doc 08 Q4).** Confirm the old orchestration ran sub-agents as separate `Runner` invocations / reloaded the session per agent (the assumed cause the Phase 2 fix rests on). If it already ran one invocation and still hit OCC, a stack trace is needed before Phase 2.
+**Still open (low-risk, non-blocking):**
+
 - **O6 — Parity goldens source (doc 08 Q8).** Capture golden outputs from the running old system (preferred) vs reconstruct from logs.
 
 **Nice-to-have clarifications (do not block):**
