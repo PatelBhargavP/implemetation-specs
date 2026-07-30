@@ -58,6 +58,14 @@ Run **one phase at a time**. For each phase:
 
 Then for later phases: `/phase 1`, `/phase 2`, … Each phase's deliverables and gate are in doc 06.
 
+### UI test suite (standalone workstream — doc 10)
+
+Independent of the backend phases; run it whenever (its own workspace/branch on the React UI). Kickoff prompt:
+
+> Read `docs/specs/10-ui-testing.md`. Add a **functional** test suite to the React/TypeScript UI using **Vitest + React Testing Library + @testing-library/user-event + jest-dom + MSW (incl. its WebSocket API) + @vitest/coverage-v8** — all as specified. Prioritize the functional journeys in doc 10 §3 (WebSocket session lifecycle, streamed-event rendering, prompt submit, approval→execution, error/reconnect paths, session list + snapshot sharing), each with happy-path **and** failure/edge assertions. Enforce **≥85%** coverage on lines/branches/functions/statements via `vitest.config` thresholds, wired into a GitHub Actions job that fails below. No assertion-free snapshots, no E2E, no second runner. Show me the test plan (which journeys → which tests) before writing, then the coverage report at the end.
+
+**Gate (doc 10 §8):** functional journeys covered with edge cases, ≥85% on all four metrics enforced in CI, suite green with lcov+junit artifacts, no coverage-gaming.
+
 ---
 
 ## 3. Gating checklist (you enforce these — the agent will try to keep going)
