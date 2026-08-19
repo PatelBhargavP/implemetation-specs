@@ -1,0 +1,1417 @@
+openapi: 3.1.0
+
+info:
+  title: Protocol Workcell Platform API
+  version: 0.1.0
+  summary: Backend API for authoring and simulating liquid-handling protocols.
+  description: |
+    The only API the frontend talks to. Companion to the ADRs in `adr/` and the
+    data model in `specs/schema.sql`.
+
+    **This document is the contract.** The TypeScript client is generated from
+    it. Frontend and backend are implemented separately; where prose and this
+    schema disagree, this schema wins.
+
+    ## Authentication
+
+    Handled entirely by Identity-Aware Proxy (ADR-001). No login, token, or
+    session endpoint exists. Requests arriving without a verified IAP assertion
+    are rejected with `401` — the API never falls back to an anonymous
+    identity.
+
+    Clients send no credentials. The browser's IAP cookie is sufficient.
+
+    ## The three independent locks (ADR-002, ADR-004)
+
+    A write can be refused for three unrelated reasons. They are separate
+    checks, all enforced server-side, and the UI must render them distinctly:
+
+    | Reason | Status | `error` |
+    |---|---|---|
+    | Caller is a `viewer` | 403 | `insufficient_role` |
+    | Another collaborator holds the protocol | 409 | `not_driver` |
+    | The agent is mid-turn | 409 | `turn_in_progress` |
+
+    A caller can be an `editor`, *and* be the driver, and still receive
+    `turn_in_progress`.
+
+    ## Not found vs. forbidden
+
+    A caller with no collaborator row on the owning workcell receives `404`,
+    never `403`. A `403` would confirm the resource exists, leaking the
+    existence of other teams' work to anyone who can guess an identifier.
+    `403 insufficient_role` is returned **only** when the caller demonstrably
+    has access but lacks the required role.
+
+    ## File paths are query parameters, not path segments
+
+    File content endpoints take `?path=` rather than embedding the path in the
+    URL. Protocol paths contain `/`, and percent-encoding those into a path
+    segment is unreliable — load balancers and proxies normalise `%2F`
+    inconsistently, and generated clients differ in whether they encode it at
+    all. A query parameter removes the ambiguity entirely.
+
+    ## WebSocket
+
+    `GET /protocols/{protocolId}/session` upgrades to a WebSocket. OpenAPI
+    cannot describe WebSocket message flows; the payloads are the `TurnEvent`
+    schema defined here, and the connection semantics are documented on that
+    operation.
+
+  contact:
+    name: Platform team
+  license:
+    name: Proprietary
+
+servers:
+  - url: /api/v1
+    description: Behind the IAP-protected load balancer.
+
+tags:
+  - name: Identity
+    description: The calling user.
+  - name: Workcells
+    description: The sharing boundary.
+  - name: Collaborators
+    description: Workcell membership and roles.
+  - name: Protocols
+    description: Isolated authoring workspaces.
+  - name: Files
+    description: Working-state file tree and content.
+  - name: Sandbox
+    description: Sandbox lifecycle and driver ownership.
+  - name: Session
+    description: Chat, agent turns, and the durable event log.
+  - name: Revisions
+    description: Immutable published snapshots — the export contract.
+  - name: Admin
+    description: Restricted operations.
+
+paths:
+
+  # ---------------------------------------------------------------- Identity
+
+  /me:
+    get:
+      operationId: getCurrentUser
+      tags: [Identity]
+      summary: The calling user
+      description: |
+        Resolves identity from the IAP assertion, creating the user record on
+        first call if it does not exist (ADR-001 P3). Safe to call at any
+        point; the frontend should not treat it as a login step.
+      responses:
+        '200':
+          description: The authenticated user.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/User' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+
+  # --------------------------------------------------------------- Workcells
+
+  /workcells:
+    get:
+      operationId: listWorkcells
+      tags: [Workcells]
+      summary: List workcells the caller can access
+      responses:
+        '200':
+          description: Workcells the caller collaborates on, including those they own.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/Workcell' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+
+    post:
+      operationId: createWorkcell
+      tags: [Workcells]
+      summary: Create a workcell
+      description: The caller becomes its owner.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { $ref: '#/components/schemas/ResourceName' }
+      responses:
+        '201':
+          description: Created.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Workcell' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+
+  /workcells/{workcellId}:
+    parameters:
+      - $ref: '#/components/parameters/WorkcellId'
+    get:
+      operationId: getWorkcell
+      tags: [Workcells]
+      summary: Get a workcell
+      responses:
+        '200':
+          description: The workcell, including the caller's own role.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Workcell' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      operationId: updateWorkcell
+      tags: [Workcells]
+      summary: Rename a workcell
+      description: Requires role `owner`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { $ref: '#/components/schemas/ResourceName' }
+      responses:
+        '200':
+          description: Updated.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Workcell' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/InsufficientRole' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      operationId: deleteWorkcell
+      tags: [Workcells]
+      summary: Delete a workcell
+      description: |
+        Requires role `owner`. Fails while any protocol in the workcell has an
+        active sandbox. Published revisions are never deleted (ADR-003 P1); a
+        workcell containing them cannot be removed.
+      responses:
+        '204': { description: Deleted. }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/InsufficientRole' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: Sandboxes still active, or published revisions exist.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  # ----------------------------------------------------------- Collaborators
+
+  /workcells/{workcellId}/collaborators:
+    parameters:
+      - $ref: '#/components/parameters/WorkcellId'
+    get:
+      operationId: listCollaborators
+      tags: [Collaborators]
+      summary: List collaborators
+      responses:
+        '200':
+          description: Current collaborators and their roles.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/Collaborator' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    post:
+      operationId: addCollaborator
+      tags: [Collaborators]
+      summary: Invite a collaborator by email
+      description: |
+        Requires role `owner`.
+
+        During the pilot, only users who have already signed in at least once
+        can be added (ADR-001 P6). Inviting an address with no user record
+        returns `422 user_not_found` — a typed error the UI renders as
+        "that person hasn't signed in yet", not a generic failure.
+
+        Role `owner` cannot be assigned here; use the ownership transfer
+        endpoint.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, role]
+              properties:
+                email: { type: string, format: email }
+                role:
+                  $ref: '#/components/schemas/AssignableRole'
+      responses:
+        '201':
+          description: Collaborator added.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Collaborator' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/InsufficientRole' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: Already a collaborator on this workcell.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '422': { $ref: '#/components/responses/UserNotFound' }
+
+  /workcells/{workcellId}/collaborators/{userId}:
+    parameters:
+      - $ref: '#/components/parameters/WorkcellId'
+      - $ref: '#/components/parameters/UserId'
+    patch:
+      operationId: updateCollaboratorRole
+      tags: [Collaborators]
+      summary: Change a collaborator's role
+      description: |
+        Requires role `owner`. Cannot promote to `owner` or demote the current
+        owner — ownership moves only through the transfer endpoint, which
+        keeps the one-owner-per-workcell invariant enforceable.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [role]
+              properties:
+                role: { $ref: '#/components/schemas/AssignableRole' }
+      responses:
+        '200':
+          description: Role updated.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Collaborator' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/InsufficientRole' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: Attempted to change the owner's role.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+    delete:
+      operationId: removeCollaborator
+      tags: [Collaborators]
+      summary: Remove a collaborator
+      description: |
+        Requires role `owner`, or the caller removing themselves. The owner
+        cannot be removed while they own the workcell.
+      responses:
+        '204': { description: Removed. }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/InsufficientRole' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: Attempted to remove the owner.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  # --------------------------------------------------------------- Protocols
+
+  /workcells/{workcellId}/protocols:
+    parameters:
+      - $ref: '#/components/parameters/WorkcellId'
+    get:
+      operationId: listProtocols
+      tags: [Protocols]
+      summary: List protocols in a workcell
+      description: |
+        Each entry includes its current driver, if any, so the list can show
+        occupancy before a user opens a protocol and is demoted to observer
+        (ADR-004 P5).
+      responses:
+        '200':
+          description: Protocols in this workcell.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/Protocol' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    post:
+      operationId: createProtocol
+      tags: [Protocols]
+      summary: Create a protocol
+      description: Requires role `editor` or `owner`. Does not start a sandbox.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { $ref: '#/components/schemas/ResourceName' }
+      responses:
+        '201':
+          description: Created, with status `idle`.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Protocol' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/InsufficientRole' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: A protocol with that name already exists in this workcell.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /protocols/{protocolId}:
+    parameters:
+      - $ref: '#/components/parameters/ProtocolId'
+    get:
+      operationId: getProtocol
+      tags: [Protocols]
+      summary: Get a protocol
+      responses:
+        '200':
+          description: The protocol, its sandbox state, and the caller's capabilities.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Protocol' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      operationId: updateProtocol
+      tags: [Protocols]
+      summary: Rename a protocol
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { $ref: '#/components/schemas/ResourceName' }
+      responses:
+        '200':
+          description: Updated.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Protocol' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/InsufficientRole' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: Name already taken in this workcell.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+    delete:
+      operationId: deleteProtocol
+      tags: [Protocols]
+      summary: Delete a protocol
+      description: |
+        Requires role `owner`. Refused while a sandbox is active, and refused
+        if the protocol has published revisions — those are audit records that
+        a future execution application may reference (ADR-003 P1).
+      responses:
+        '204': { description: Deleted. }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/InsufficientRole' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: Sandbox active, or published revisions exist.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  # ------------------------------------------------------------------- Files
+
+  /protocols/{protocolId}/files:
+    parameters:
+      - $ref: '#/components/parameters/ProtocolId'
+    get:
+      operationId: listProtocolFiles
+      tags: [Files]
+      summary: List the working file tree
+      description: |
+        **Works with no sandbox running.** When the protocol is idle this is
+        served from object storage (ADR-002 P6). Browsing must never depend on
+        sandbox availability — a degraded cluster leaves the product readable.
+      responses:
+        '200':
+          description: Flat list of files; the client builds the tree.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, source]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/FileEntry' }
+                  source:
+                    type: string
+                    enum: [sandbox, storage]
+                    description: Where this listing was read from.
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /protocols/{protocolId}/file:
+    parameters:
+      - $ref: '#/components/parameters/ProtocolId'
+      - $ref: '#/components/parameters/FilePath'
+    get:
+      operationId: getProtocolFile
+      tags: [Files]
+      summary: Read a file's content
+      description: Works with no sandbox running. `ETag` carries the content hash.
+      responses:
+        '200':
+          description: File content.
+          headers:
+            ETag:
+              description: SHA-256 of the content. Pass to `If-Match` when saving.
+              schema: { type: string }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/FileContent' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    put:
+      operationId: saveProtocolFile
+      tags: [Files]
+      summary: Save a manual edit
+      description: |
+        Requires role `editor` or `owner`, **and** that the caller is the
+        current driver, **and** that no agent turn is in progress. These are
+        three independent checks (ADR-002 P1, ADR-004 P2).
+
+        Behaviour depends on sandbox state:
+
+        - **Sandbox running, agent idle** — written through to the sandbox,
+          which immediately injects an awareness note into the live
+          conversation. The response reports `agent_notified: true`.
+        - **No sandbox** — written to object storage and logged. The next
+          sandbox start primes the agent with a summary of unconsumed edits.
+          `agent_notified: false`.
+        - **Agent mid-turn** — refused with `409 turn_in_progress`. The client
+          locks the editor on `turn_start`, but this check is what actually
+          guarantees it: a stale client must not be able to race the agent.
+
+        Supplying `If-Match` with the ETag from a prior read makes the write
+        conditional, preventing a lost update when the file changed underneath
+        the editor. Strongly recommended.
+      parameters:
+        - name: If-Match
+          in: header
+          required: false
+          description: ETag from the last read. Rejected with `412` if stale.
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [content]
+              properties:
+                content: { type: string }
+      responses:
+        '200':
+          description: Saved.
+          headers:
+            ETag:
+              description: SHA-256 of the newly saved content.
+              schema: { type: string }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SaveResult' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/InsufficientRole' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/WriteConflict' }
+        '412':
+          description: '`If-Match` did not match current content; the file changed.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+    delete:
+      operationId: deleteProtocolFile
+      tags: [Files]
+      summary: Delete a file
+      description: Same three checks as saving.
+      responses:
+        '204': { description: Deleted. }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/InsufficientRole' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/WriteConflict' }
+
+  # ----------------------------------------------------------------- Sandbox
+
+  /protocols/{protocolId}/sandbox:
+    parameters:
+      - $ref: '#/components/parameters/ProtocolId'
+    get:
+      operationId: getSandboxState
+      tags: [Sandbox]
+      summary: Current sandbox and driver state
+      responses:
+        '200':
+          description: Sandbox state. `status` is `idle` when none is running.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SandboxState' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /protocols/{protocolId}/sandbox/start:
+    parameters:
+      - $ref: '#/components/parameters/ProtocolId'
+    post:
+      operationId: startSandbox
+      tags: [Sandbox]
+      summary: Start a sandbox and become the driver
+      description: |
+        Asynchronous — returns `202` immediately with status `provisioning`.
+        Poll `GET /protocols/{protocolId}/sandbox` or watch the session
+        WebSocket for the transition to `running`.
+
+        **The caller becomes the protocol's driver** (ADR-004 P1). If another
+        collaborator is already driving, returns `409 not_driver` carrying
+        their identity, so the client can render the observer banner without a
+        second request.
+
+        Requires role `editor` or `owner`.
+      responses:
+        '202':
+          description: Provisioning started.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SandboxState' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/InsufficientRole' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/NotDriver' }
+        '503':
+          description: No sandbox capacity available.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /protocols/{protocolId}/sandbox/stop:
+    parameters:
+      - $ref: '#/components/parameters/ProtocolId'
+    post:
+      operationId: stopSandbox
+      tags: [Sandbox]
+      summary: Stop the sandbox and release the driver lock
+      description: |
+        Flushes working state to storage, then tears down. Only the current
+        driver may stop a sandbox. Refused while an agent turn is in progress —
+        stopping mid-turn would discard work and risk a partial flush.
+      responses:
+        '202':
+          description: Shutdown started.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SandboxState' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/InsufficientRole' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/WriteConflict' }
+
+  # ----------------------------------------------------------------- Session
+
+  /protocols/{protocolId}/messages:
+    parameters:
+      - $ref: '#/components/parameters/ProtocolId'
+    post:
+      operationId: sendMessage
+      tags: [Session]
+      summary: Send a prompt to the agent
+      description: |
+        Requires role `editor` or `owner` — **a `viewer` may never send a
+        prompt**, because prompting causes the agent to modify files, which
+        would make viewers editors in all but name.
+
+        The caller must be the current driver, and no turn may be in progress.
+
+        If no sandbox is running, one is started implicitly and the caller
+        becomes the driver; the response reports `provisioning` and the turn
+        begins once it is ready. Output streams over the session WebSocket and
+        is durably recorded — see `GET /protocols/{protocolId}/events`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [content]
+              properties:
+                content: { type: string, minLength: 1 }
+      responses:
+        '202':
+          description: Prompt accepted; the turn has started or will on provisioning.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [turn_id, seq, sandbox_status]
+                properties:
+                  turn_id: { type: string, format: uuid }
+                  seq:
+                    type: integer
+                    format: int64
+                    description: Sequence number of the recorded user message.
+                  sandbox_status: { $ref: '#/components/schemas/SandboxStatus' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/InsufficientRole' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/WriteConflict' }
+
+  /protocols/{protocolId}/events:
+    parameters:
+      - $ref: '#/components/parameters/ProtocolId'
+    get:
+      operationId: listTurnEvents
+      tags: [Session]
+      summary: Read the durable conversation log
+      description: |
+        Backs both initial history load and reconnection catch-up (ADR-002 P2).
+
+        A turn keeps running in the sandbox when its WebSocket drops, and no
+        connection survives beyond roughly an hour. Clients therefore reconnect
+        with `since` set to the last `seq` they processed and replay what they
+        missed. Sequence numbers are gapless and monotonic per protocol.
+
+        Available to observers as well as the driver (ADR-004 P4).
+      parameters:
+        - name: since
+          in: query
+          required: false
+          description: Return events with `seq` strictly greater than this.
+          schema: { type: integer, format: int64, minimum: 0 }
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 500, default: 100 }
+      responses:
+        '200':
+          description: Events in ascending `seq` order.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, has_more]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/TurnEvent' }
+                  has_more:
+                    type: boolean
+                    description: More events exist beyond this page.
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /protocols/{protocolId}/session:
+    parameters:
+      - $ref: '#/components/parameters/ProtocolId'
+    get:
+      operationId: openSessionWebSocket
+      tags: [Session]
+      summary: WebSocket — live agent events
+      x-websocket: true
+      x-codegen-skip: true
+      description: |
+        Upgrades to a WebSocket carrying `TurnEvent` messages. **This operation
+        is documented here for completeness; it is not a REST call and
+        generated clients should ignore it.**
+
+        Server-to-client messages are `TurnEvent` objects, identical to those
+        returned by `GET /protocols/{protocolId}/events`. The client sends
+        nothing but protocol-level pings; prompts go through
+        `POST /protocols/{protocolId}/messages`.
+
+        Connection semantics the client must implement:
+
+        - Connect with `?since=<last_seq>` to resume without gaps. Omit on a
+          first connection to receive only new events.
+        - Both the load balancer and the runtime bound connection lifetime, so
+          disconnects are routine and expected. **Always reconnect and replay
+          rather than treating a drop as an error.**
+        - After a long idle period the IAP cookie may have expired, in which
+          case the upgrade returns a redirect to the sign-in page rather than
+          a `401`. On any non-`101` response, trigger a full page reload — do
+          not retry in a loop.
+        - Observers receive the identical stream but may not send (ADR-004 P4).
+      parameters:
+        - name: since
+          in: query
+          required: false
+          schema: { type: integer, format: int64, minimum: 0 }
+      responses:
+        '101': { description: Switching protocols; the WebSocket is established. }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  # --------------------------------------------------------------- Revisions
+
+  /protocols/{protocolId}/revisions:
+    parameters:
+      - $ref: '#/components/parameters/ProtocolId'
+    get:
+      operationId: listRevisions
+      tags: [Revisions]
+      summary: List published revisions
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+        - name: before
+          in: query
+          required: false
+          description: Return revisions numbered below this, newest first.
+          schema: { type: integer, minimum: 1 }
+      responses:
+        '200':
+          description: Revisions, newest first.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, has_more]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/RevisionSummary' }
+                  has_more: { type: boolean }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    post:
+      operationId: publishRevision
+      tags: [Revisions]
+      summary: Publish the working state as an immutable revision
+      description: |
+        Requires role `editor` or `owner`, and that the caller is the driver.
+        Refused with `409 turn_in_progress` while the agent is working —
+        publishing mid-turn would capture an arbitrary intermediate state
+        (ADR-003 P3).
+
+        Revisions are **immutable and permanent**: never modified, never
+        deleted. This is what lets a future execution application trust what it
+        reads, and what makes a past run reproducible.
+
+        `simulation.status` is recorded honestly, including `not_run`. It is
+        never defaulted to `passed` — the consuming application decides what to
+        do about an unsimulated protocol; this API's obligation is to report
+        the truth.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                label:
+                  type: string
+                  maxLength: 200
+                  description: Optional researcher-supplied note.
+      responses:
+        '201':
+          description: Published.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Revision' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/InsufficientRole' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/WriteConflict' }
+        '422':
+          description: Nothing to publish — the working state is empty.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /protocols/{protocolId}/revisions/{revisionNumber}:
+    parameters:
+      - $ref: '#/components/parameters/ProtocolId'
+      - $ref: '#/components/parameters/RevisionNumber'
+    get:
+      operationId: getRevision
+      tags: [Revisions]
+      summary: Get a revision and its full manifest
+      description: |
+        Part of the export contract consumed by the future execution
+        application. `manifest_version` is checked by consumers, which must
+        reject major versions they do not recognise (ADR-003 P5).
+      responses:
+        '200':
+          description: The revision.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Revision' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /protocols/{protocolId}/revisions/{revisionNumber}/files:
+    parameters:
+      - $ref: '#/components/parameters/ProtocolId'
+      - $ref: '#/components/parameters/RevisionNumber'
+    get:
+      operationId: listRevisionFiles
+      tags: [Revisions]
+      summary: List a revision's files
+      responses:
+        '200':
+          description: Files in this revision, with content hashes.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/RevisionFileEntry' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /protocols/{protocolId}/revisions/{revisionNumber}/file:
+    parameters:
+      - $ref: '#/components/parameters/ProtocolId'
+      - $ref: '#/components/parameters/RevisionNumber'
+      - $ref: '#/components/parameters/FilePath'
+    get:
+      operationId: getRevisionFile
+      tags: [Revisions]
+      summary: Read a file from a revision
+      description: Immutable, so freely cacheable.
+      responses:
+        '200':
+          description: File content as published.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/FileContent' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  # ------------------------------------------------------------------- Admin
+
+  /admin/workcells/{workcellId}/transfer-owner:
+    parameters:
+      - $ref: '#/components/parameters/WorkcellId'
+    post:
+      operationId: transferWorkcellOwner
+      tags: [Admin]
+      summary: Transfer workcell ownership
+      description: |
+        Restricted to platform administrators, identified from configuration
+        rather than hardcoded (ADR-001 P7).
+
+        Exists because a workcell whose sole owner has been offboarded is
+        otherwise unadministrable. The demotion and promotion happen in one
+        transaction, preserving exactly one owner per workcell. Every transfer
+        writes an audit record.
+
+        The new owner must already be a collaborator on the workcell.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [new_owner_user_id]
+              properties:
+                new_owner_user_id: { type: string, format: uuid }
+                reason: { type: string, maxLength: 500 }
+      responses:
+        '200':
+          description: Ownership transferred.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Workcell' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403':
+          description: Caller is not a platform administrator.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422':
+          description: Target user is not a collaborator on this workcell.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+# =============================================================================
+
+components:
+
+  parameters:
+
+    WorkcellId:
+      name: workcellId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+
+    ProtocolId:
+      name: protocolId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+
+    UserId:
+      name: userId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+
+    RevisionNumber:
+      name: revisionNumber
+      in: path
+      required: true
+      schema: { type: integer, minimum: 1 }
+
+    FilePath:
+      name: path
+      in: query
+      required: true
+      description: |
+        Path relative to the protocol root, e.g. `protocol.py` or
+        `resources/deck.py`. Must not be absolute or contain `..`.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 1024
+        pattern: '^(?!/)(?!.*\.\.)[^\x00]+$'
+
+  # ---------------------------------------------------------------- Schemas
+
+  schemas:
+
+    ResourceName:
+      type: string
+      minLength: 1
+      maxLength: 120
+      description: Display name. Leading and trailing whitespace is trimmed.
+
+    Role:
+      type: string
+      enum: [owner, editor, viewer]
+      description: |
+        `viewer` may read files, chat history, and revisions — and nothing
+        else. Notably a viewer may **not** send prompts, because prompting
+        mutates files.
+
+    AssignableRole:
+      type: string
+      enum: [editor, viewer]
+      description: Roles assignable through collaborator endpoints. `owner` moves only via transfer.
+
+    ProtocolStatus:
+      type: string
+      enum: [idle, provisioning, running, error]
+
+    SandboxStatus:
+      type: string
+      enum: [idle, provisioning, running, stopping, failed]
+
+    SimulationStatus:
+      type: string
+      enum: [passed, failed, not_run]
+
+    User:
+      type: object
+      required: [id, email, is_admin]
+      properties:
+        id: { type: string, format: uuid }
+        email: { type: string, format: email }
+        display_name: { type: ['string', 'null'] }
+        is_admin: { type: boolean }
+
+    UserRef:
+      type: object
+      required: [user_id, email]
+      description: Compact user reference embedded in other resources.
+      properties:
+        user_id: { type: string, format: uuid }
+        email: { type: string, format: email }
+        display_name: { type: ['string', 'null'] }
+
+    Workcell:
+      type: object
+      required: [id, name, created_at, my_role, protocol_count]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        owner: { $ref: '#/components/schemas/UserRef' }
+        my_role:
+          allOf: [{ $ref: '#/components/schemas/Role' }]
+          description: |
+            The calling user's role. Lets the UI distinguish owned from shared
+            workcells and gate controls without a second request.
+        protocol_count: { type: integer, minimum: 0 }
+
+    Collaborator:
+      type: object
+      required: [user, role, added_at]
+      properties:
+        user: { $ref: '#/components/schemas/UserRef' }
+        role: { $ref: '#/components/schemas/Role' }
+        added_at: { type: string, format: date-time }
+        added_by: { $ref: '#/components/schemas/UserRef' }
+
+    Protocol:
+      type: object
+      required: [id, workcell_id, name, status, runtime_profile, created_at, capabilities]
+      properties:
+        id: { type: string, format: uuid }
+        workcell_id: { type: string, format: uuid }
+        name: { type: string }
+        status: { $ref: '#/components/schemas/ProtocolStatus' }
+        runtime_profile:
+          type: string
+          description: |
+            The sandbox environment this protocol runs in. A single fixed value
+            today; present from the outset so additional profiles need no
+            migration (ADR-005 P1).
+        driver:
+          oneOf:
+            - $ref: '#/components/schemas/UserRef'
+            - type: 'null'
+          description: Current driver, or null if the protocol is unclaimed.
+        latest_revision_number: { type: ['integer', 'null'], minimum: 1 }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        capabilities: { $ref: '#/components/schemas/Capabilities' }
+
+    Capabilities:
+      type: object
+      required: [can_edit, can_prompt, can_publish, can_manage_collaborators, is_driver]
+      description: |
+        What the calling user may do **right now**, given role, driver state,
+        and turn state combined. Provided so the UI need not reimplement the
+        authorization rules and drift from the server's view of them.
+
+        These are a convenience for rendering. **The server enforces every rule
+        independently** — a client that ignores these fields cannot bypass
+        anything.
+      properties:
+        can_edit: { type: boolean }
+        can_prompt: { type: boolean }
+        can_publish: { type: boolean }
+        can_manage_collaborators: { type: boolean }
+        is_driver: { type: boolean }
+        blocked_reason:
+          type: ['string', 'null']
+          enum: [insufficient_role, not_driver, turn_in_progress, null]
+          description: |
+            Why write actions are currently unavailable. Drives which banner the
+            UI shows — the three causes must not be rendered identically.
+
+    SandboxState:
+      type: object
+      required: [protocol_id, status]
+      properties:
+        protocol_id: { type: string, format: uuid }
+        status: { $ref: '#/components/schemas/SandboxStatus' }
+        session_id: { type: ['string', 'null'], format: uuid }
+        driver:
+          oneOf:
+            - $ref: '#/components/schemas/UserRef'
+            - type: 'null'
+        turn_in_progress:
+          type: boolean
+          description: |
+            Authoritative source is the sandbox itself (ADR-002 P1). This field
+            is a relay for UI state, never the basis of a client-side guarantee.
+        started_at: { type: ['string', 'null'], format: date-time }
+        last_activity_at: { type: ['string', 'null'], format: date-time }
+        error_message: { type: ['string', 'null'] }
+
+    FileEntry:
+      type: object
+      required: [path, size_bytes, modified_at]
+      properties:
+        path: { type: string }
+        size_bytes: { type: integer, minimum: 0 }
+        modified_at: { type: string, format: date-time }
+        sha256: { type: ['string', 'null'] }
+
+    RevisionFileEntry:
+      type: object
+      required: [path, size_bytes, sha256]
+      properties:
+        path: { type: string }
+        size_bytes: { type: integer, minimum: 0 }
+        sha256: { type: string }
+
+    FileContent:
+      type: object
+      required: [path, content, sha256]
+      properties:
+        path: { type: string }
+        content: { type: string }
+        sha256: { type: string }
+        size_bytes: { type: integer, minimum: 0 }
+
+    SaveResult:
+      type: object
+      required: [path, sha256, agent_notified]
+      properties:
+        path: { type: string }
+        sha256: { type: string }
+        agent_notified:
+          type: boolean
+          description: |
+            True when a live sandbox received the edit and injected an
+            awareness note into the conversation. False when written to storage
+            with no sandbox running — the agent is primed on next start.
+
+            The UI uses this to choose its confirmation copy: "Saved — agent
+            notified" versus "Saved — the agent will see this next session".
+        edit_id: { type: string, format: uuid }
+
+    TurnEvent:
+      type: object
+      required: [seq, kind, created_at]
+      description: |
+        One entry in a protocol's durable conversation log. Identical whether
+        delivered over the WebSocket or read back from `/events`, so clients
+        need one handler rather than two.
+      properties:
+        seq:
+          type: integer
+          format: int64
+          description: Gapless, monotonic per protocol. The reconnection cursor.
+        kind:
+          type: string
+          enum:
+            - user_message
+            - agent_delta
+            - agent_message
+            - tool_call
+            - file_changed
+            - manual_edit
+            - turn_start
+            - turn_end
+            - error
+        turn_id: { type: ['string', 'null'], format: uuid }
+        actor:
+          oneOf:
+            - $ref: '#/components/schemas/UserRef'
+            - type: 'null'
+          description: The user responsible, where one exists. Null for agent-originated events.
+        payload:
+          type: object
+          additionalProperties: true
+          description: |
+            Shape depends on `kind`. `agent_delta` carries `{text}`;
+            `file_changed` and `manual_edit` carry `{path}`; `error` carries
+            `{message}`. Clients must ignore event kinds they do not recognise
+            rather than failing — new kinds will be added.
+        created_at: { type: string, format: date-time }
+
+    RevisionSummary:
+      type: object
+      required: [revision_number, published_at, published_by, simulation_status]
+      properties:
+        revision_number: { type: integer, minimum: 1 }
+        label: { type: ['string', 'null'] }
+        published_at: { type: string, format: date-time }
+        published_by: { $ref: '#/components/schemas/UserRef' }
+        simulation_status: { $ref: '#/components/schemas/SimulationStatus' }
+        file_count: { type: integer, minimum: 0 }
+
+    Revision:
+      type: object
+      required:
+        [revision_number, protocol_id, workcell_id, published_at, published_by,
+         manifest_version, files, runtime, simulation]
+      description: |
+        The export contract. Consumed by the future execution application,
+        which uses `runtime` and `simulation` to decide whether a revision is
+        safe to run at all — a file list alone is not sufficient for that
+        judgement.
+      properties:
+        revision_number: { type: integer, minimum: 1 }
+        protocol_id: { type: string, format: uuid }
+        workcell_id: { type: string, format: uuid }
+        label: { type: ['string', 'null'] }
+        published_at: { type: string, format: date-time }
+        published_by: { $ref: '#/components/schemas/UserRef' }
+        manifest_version:
+          type: string
+          description: |
+            Contract version, e.g. `1.0`. Consumers must reject major versions
+            they do not recognise. Present from the first revision ever written
+            so the contract can evolve without lockstep deployment.
+        files:
+          type: array
+          items: { $ref: '#/components/schemas/RevisionFileEntry' }
+        runtime:
+          type: object
+          required: [profile, image_digest]
+          properties:
+            profile: { type: string }
+            image_digest:
+              type: string
+              description: Exact sandbox image that produced this revision.
+            python_version: { type: string }
+            libraries:
+              type: object
+              additionalProperties: { type: string }
+              description: Pinned versions, never ranges.
+        simulation:
+          type: object
+          required: [status]
+          properties:
+            status: { $ref: '#/components/schemas/SimulationStatus' }
+            ran_at: { type: ['string', 'null'], format: date-time }
+            summary_ref: { type: ['string', 'null'] }
+
+    ErrorCode:
+      type: string
+      enum:
+        - unauthenticated
+        - insufficient_role
+        - not_found
+        - validation_error
+        - not_driver
+        - turn_in_progress
+        - user_not_found
+        - already_exists
+        - precondition_failed
+        - sandbox_unavailable
+        - conflict
+
+    Error:
+      type: object
+      required: [error, message]
+      description: |
+        Every non-2xx response uses this shape. `error` is a stable machine
+        code the client switches on; `message` is human-readable and may
+        change freely without being a breaking change.
+      properties:
+        error: { $ref: '#/components/schemas/ErrorCode' }
+        message: { type: string }
+        details:
+          type: object
+          additionalProperties: true
+
+    NotDriverError:
+      allOf:
+        - $ref: '#/components/schemas/Error'
+        - type: object
+          required: [driver]
+          properties:
+            driver: { $ref: '#/components/schemas/UserRef' }
+            since:
+              type: string
+              format: date-time
+              description: When the current driver acquired the protocol.
+      description: |
+        Carries the driver's identity so the client can render the observer
+        banner from the error alone, with no follow-up request.
+
+  # -------------------------------------------------------------- Responses
+
+  responses:
+
+    Unauthenticated:
+      description: |
+        No valid IAP assertion. Should not occur in normal operation — the
+        proxy rejects unauthenticated traffic before it reaches the API. Seeing
+        this means either a misconfiguration or a request that bypassed the
+        load balancer, and the API fails closed rather than assuming an
+        identity (ADR-001 P1).
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+
+    NotFound:
+      description: |
+        The resource does not exist, **or** the caller has no access to the
+        owning workcell. These are deliberately indistinguishable: a `403`
+        would confirm existence and leak other teams' work to anyone guessing
+        identifiers.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+
+    InsufficientRole:
+      description: |
+        The caller has access to the workcell but lacks the required role —
+        typically a `viewer` attempting a write or a prompt.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+
+    ValidationError:
+      description: Malformed request body or parameters.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+
+    UserNotFound:
+      description: |
+        No user record for that email. During the pilot, collaborators must
+        have signed in at least once before they can be added (ADR-001 P6).
+        Rendered as "that person hasn't signed in yet".
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+
+    NotDriver:
+      description: Another collaborator currently holds this protocol.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/NotDriverError' }
+
+    WriteConflict:
+      description: |
+        The write was refused. Inspect `error` to distinguish:
+
+        - `not_driver` — another collaborator holds the protocol; the body is a
+          `NotDriverError` carrying their identity.
+        - `turn_in_progress` — the agent is mid-turn. Transient; the client
+          should re-enable on the next `turn_end` event.
+
+        These require different UI treatment and different user action, so they
+        must never be collapsed into one message.
+      content:
+        application/json:
+          schema:
+            oneOf:
+              - $ref: '#/components/schemas/NotDriverError'
+              - $ref: '#/components/schemas/Error'
