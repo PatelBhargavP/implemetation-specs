@@ -1,0 +1,119 @@
+# ── OS ────────────────────────────────────────────────────
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+
+# ── Editors / IDEs ────────────────────────────────────────
+.vscode/
+!.vscode/settings.json
+!.vscode/extensions.json
+.idea/
+*.swp
+*.swo
+*~
+.\#*
+\#*\#
+
+# ── Python ────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+.python-version
+
+# Tooling caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.pyre/
+.pytype/
+.dmypy.json
+dmypy.json
+htmlcov/
+.coverage
+.coverage.*
+coverage.xml
+*.cover
+.tox/
+.nox/
+.hypothesis/
+
+# ── Node ──────────────────────────────────────────────────
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# ── Secrets and credentials ───────────────────────────────
+# Never commit these. Service account keys, OAuth client secrets and
+# local machine config all carry credentials or environment-specific
+# values that do not belong in version control.
+*.pem
+*.key
+*credentials*.json
+*service-account*.json
+client_secret*.json
+.env
+.env.*
+!.env.example
+config.local.toml
+
+# ── Experiment Executor: local runtime state ──────────────
+# Run logs, event spools and staged protocol scripts are per-machine
+# artefacts. Logs sync to GCS by run ID; they are not repo content.
+/var/
+work_dir/
+runs/
+spool.db
+spool.db-*
+*.jsonl
+!examples/**/*.jsonl
+
+# Local deck and machine configuration are written at provisioning time
+# and differ per lab computer.
+deck.local.json
+config.toml
+!examples/**/config.toml
+
+# ── Terraform / infra state ───────────────────────────────
+*.tfstate
+*.tfstate.*
+.terraform/
+.terraform.lock.hcl
+*.tfvars
+!*.tfvars.example
+
+# ── Build and scratch ─────────────────────────────────────
+*.log
+tmp/
+.tmp/
+scratch/
+_to_delete/
